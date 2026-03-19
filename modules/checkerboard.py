@@ -1,7 +1,6 @@
-"""
 """Checkerboard image creation.
 
-Used for visual validation of deformation field corrections — a
+Used for visual validation of deformation field corrections -- a
 checkerboard pattern makes folding artefacts easy to spot.
 
 Usage::

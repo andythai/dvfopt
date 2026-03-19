@@ -13,6 +13,8 @@ Usage::
     from modules.dvfviz import (
         plot_deformations,
         plot_grid_before_after,
+        plot_checkerboard_before_after,
+        plot_neg_jdet_neighborhoods,
         plot_initial_deformation,
         plot_jacobians_iteratively,
         plot_step_snapshot,
@@ -28,6 +30,7 @@ from matplotlib.patches import Polygon
 from matplotlib.cm import ScalarMappable
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import numpy as np
+from scipy.ndimage import map_coordinates
 
 from modules.dvfopt import iterative_with_jacobians2, jacobian_det2D
 import modules.jacobian as jacobian
@@ -647,13 +650,56 @@ def plot_deformed_quads_colored(deformation, center_y, center_x, spacing=1,
 # ---------------------------------------------------------------------------
 # Before / after deformation grid comparison
 # ---------------------------------------------------------------------------
+def _invert_displacement(dy, dx, iterations=50):
+    """Compute inverse displacement field via fixed-point iteration.
+
+    Given pull-back displacement *d* where ``T(x) = x + d(x)`` maps
+    fixed → moving, compute ``d_inv`` where ``T^{-1}(y) = y + d_inv(y)``
+    maps moving → fixed.
+
+    Uses the iteration ``d_inv^{k+1}(y) = -d(y + d_inv^k(y))``,
+    starting from the naive ``d_inv^0 = -d``.
+    """
+    H, W = dy.shape
+    yy, xx = np.mgrid[0:H, 0:W].astype(float)
+
+    inv_dy = -dy.copy()
+    inv_dx = -dx.copy()
+
+    for _ in range(iterations):
+        sample_y = np.clip(yy + inv_dy, 0, H - 1)
+        sample_x = np.clip(xx + inv_dx, 0, W - 1)
+
+        sampled_dy = map_coordinates(dy, [sample_y, sample_x],
+                                     order=1, mode='nearest')
+        sampled_dx = map_coordinates(dx, [sample_y, sample_x],
+                                     order=1, mode='nearest')
+
+        inv_dy = -sampled_dy
+        inv_dx = -sampled_dx
+
+    return inv_dy, inv_dx
+
+
 def plot_grid_before_after(deformation_i, phi_corrected, figsize=(14, 6),
-                           title="", spacing=1, linewidth=0.5):
+                           title="", spacing=1, linewidth=0.5,
+                           inverse=False):
     """Side-by-side deformation grids coloured by Jacobian determinant.
 
-    Left panel: grid deformed by the *initial* field.
-    Right panel: grid after correction.  Negative-Jdet cells are outlined
-    in yellow.
+    The displacement field uses the **pull-back** convention: for each
+    pixel in the fixed image, the displacement vector points to where
+    in the moving image that pixel samples from.  The deformed grid
+    therefore shows how the regular fixed-image grid maps into
+    moving-image space (the sampling pattern).
+
+    When ``inverse=True`` the inverse displacement is computed via
+    fixed-point iteration (see ``_invert_displacement``), giving the
+    true push-forward view: a regular grid in moving-image space
+    mapped back into fixed-image space.
+
+    Rendering: light Jdet-coloured quad fills + black wireframe grid
+    lines drawn on top.  Negative-Jdet cells are filled opaque with a
+    yellow outline.  Folding is visible as grid-line crossings.
 
     Parameters
     ----------
@@ -668,14 +714,49 @@ def plot_grid_before_after(deformation_i, phi_corrected, figsize=(14, 6),
     spacing : int
         Grid cell size in pixels (1 = every pixel).
     linewidth : float
-        Edge line width for each quad cell.
+        Grid line width.
+    inverse : bool
+        If False (default), show fixed→moving (pull-back).
+        If True, show moving→fixed via proper fixed-point inversion.
     """
     _, _, H, W = deformation_i.shape
 
     phi_init = np.stack([deformation_i[1, 0], deformation_i[2, 0]])  # [dy, dx]
 
-    jac_init = np.squeeze(jacobian_det2D(phi_init))
-    jac_corr = np.squeeze(jacobian_det2D(phi_corrected))
+    if inverse:
+        inv_init_dy, inv_init_dx = _invert_displacement(phi_init[0], phi_init[1])
+        phi_init_view = np.stack([inv_init_dy, inv_init_dx])
+        inv_corr_dy, inv_corr_dx = _invert_displacement(phi_corrected[0], phi_corrected[1])
+        phi_corr_view = np.stack([inv_corr_dy, inv_corr_dx])
+
+        # Inverse Jacobian: J_{T^{-1}}(y) = 1 / J_T(T^{-1}(y))
+        jac_fwd_init = np.squeeze(jacobian_det2D(phi_init))
+        jac_fwd_corr = np.squeeze(jacobian_det2D(phi_corrected))
+
+        yy, xx = np.mgrid[0:H, 0:W].astype(float)
+
+        preimg_y = np.clip(yy + inv_init_dy, 0, H - 1)
+        preimg_x = np.clip(xx + inv_init_dx, 0, W - 1)
+        jac_fwd_at_preimg = map_coordinates(
+            jac_fwd_init, [preimg_y, preimg_x], order=1, mode='nearest')
+        with np.errstate(divide='ignore', invalid='ignore'):
+            jac_init = np.where(
+                np.abs(jac_fwd_at_preimg) > 1e-10,
+                1.0 / jac_fwd_at_preimg, 0.0)
+
+        preimg_y = np.clip(yy + inv_corr_dy, 0, H - 1)
+        preimg_x = np.clip(xx + inv_corr_dx, 0, W - 1)
+        jac_fwd_at_preimg = map_coordinates(
+            jac_fwd_corr, [preimg_y, preimg_x], order=1, mode='nearest')
+        with np.errstate(divide='ignore', invalid='ignore'):
+            jac_corr = np.where(
+                np.abs(jac_fwd_at_preimg) > 1e-10,
+                1.0 / jac_fwd_at_preimg, 0.0)
+    else:
+        phi_init_view = phi_init
+        phi_corr_view = phi_corrected
+        jac_init = np.squeeze(jacobian_det2D(phi_init))
+        jac_corr = np.squeeze(jacobian_det2D(phi_corrected))
 
     # Shared colour normalisation across both panels
     J_all = np.concatenate([jac_init.ravel(), jac_corr.ravel()])
@@ -689,47 +770,417 @@ def plot_grid_before_after(deformation_i, phi_corrected, figsize=(14, 6),
     init_neg = int((jac_init <= 0).sum())
     corr_neg = int((jac_corr <= 0).sum())
 
+    arrow = "moving\u2192fixed" if inverse else "fixed\u2192moving"
+
     for ax, phi, jac, label in [
-        (axes[0], phi_init,      jac_init, f"Initial (neg Jdet = {init_neg})"),
-        (axes[1], phi_corrected, jac_corr, f"Corrected (neg Jdet = {corr_neg})"),
+        (axes[0], phi_init_view, jac_init, f"Initial — {arrow} (neg Jdet = {init_neg})"),
+        (axes[1], phi_corr_view, jac_corr, f"Corrected — {arrow} (neg Jdet = {corr_neg})"),
     ]:
         dy = phi[0]
         dx = phi[1]
 
+        # Deformed vertex positions for the full grid
+        yy, xx = np.mgrid[0:H, 0:W].astype(float)
+        def_x = xx + dx
+        def_y = yy + dy
+
+        # Layer 1: light Jdet-coloured cell fills
         for i in range(0, H - spacing, spacing):
             for j in range(0, W - spacing, spacing):
-                # Four corners of the pixel quad (row, col)
-                corners_rc = [
-                    (i,           j),
-                    (i,           j + spacing),
-                    (i + spacing, j + spacing),
-                    (i + spacing, j),
-                ]
-                # Deform: add displacement at each corner → (x, y) for Polygon
-                deformed = []
-                for r, c in corners_rc:
-                    r_c = np.clip(r, 0, H - 1)
-                    c_c = np.clip(c, 0, W - 1)
-                    deformed.append((c + dx[r_c, c_c], r + dy[r_c, c_c]))
-
+                ci = [i, i, i + spacing, i + spacing]
+                cj = [j, j + spacing, j + spacing, j]
+                corners = [(def_x[np.clip(r, 0, H-1), np.clip(c, 0, W-1)],
+                            def_y[np.clip(r, 0, H-1), np.clip(c, 0, W-1)])
+                           for r, c in zip(ci, cj)]
                 jval = jac[i, j]
-                ec = "yellow" if jval <= 0 else "black"
-                lw = max(linewidth, 1.5) if jval <= 0 else linewidth
-                poly = Polygon(deformed, closed=True, edgecolor=ec,
-                               facecolor=cmap(norm(jval)), linewidth=lw)
+                if jval <= 0:
+                    # Negative cell: opaque fill + yellow outline
+                    fc = cmap(norm(jval))
+                    poly = Polygon(corners, closed=True,
+                                   facecolor=fc, edgecolor="yellow",
+                                   linewidth=max(linewidth * 3, 1.5),
+                                   zorder=2)
+                else:
+                    # Positive cell: light fill, no outline (grid lines go on top)
+                    fc = cmap(norm(jval))
+                    poly = Polygon(corners, closed=True,
+                                   facecolor=(*fc[:3], 0.25),
+                                   edgecolor="none", zorder=0)
                 ax.add_patch(poly)
 
-        ax.set_xlim(-1, W)
-        ax.set_ylim(H, -1)
+        # Layer 2: wireframe grid lines at sampled positions (drawn on top)
+        # Row indices and column indices at spacing intervals
+        row_indices = list(range(0, H, spacing))
+        if (H - 1) not in row_indices:
+            row_indices.append(H - 1)
+        col_indices = list(range(0, W, spacing))
+        if (W - 1) not in col_indices:
+            col_indices.append(W - 1)
+
+        for i in row_indices:
+            ax.plot(def_x[i, col_indices], def_y[i, col_indices], 'k-',
+                    linewidth=linewidth, zorder=1)
+        for j in col_indices:
+            ax.plot(def_x[row_indices, j], def_y[row_indices, j], 'k-',
+                    linewidth=linewidth, zorder=1)
+
+        # Axis limits from deformed extent
+        pad = max(W, H) * 0.03
+        ax.set_xlim(def_x.min() - pad, def_x.max() + pad)
+        ax.set_ylim(def_y.max() + pad, def_y.min() - pad)
         ax.set_aspect("equal")
         ax.set_title(label, fontsize=11)
 
     sm = ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
+    fig.subplots_adjust(right=0.87)
     fig.colorbar(sm, ax=axes.tolist(), label="Jacobian determinant",
-                 fraction=0.03, pad=0.04, shrink=0.85)
+                 fraction=0.03, pad=0.06, shrink=0.85)
 
     if title:
         fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
-    fig.tight_layout(rect=[0, 0, 0.92, 1])
+    fig.tight_layout(rect=[0, 0, 0.87, 1])
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Folding close-up: reference grid vs deformed grid
+# ---------------------------------------------------------------------------
+def _find_neg_jdet_centers(jac, H, W, margin, max_panels, dedup_dist):
+    """Find deduplicated neg-Jdet pixel centres, worst-first."""
+    neg_mask = jac <= 0
+    if not neg_mask.any():
+        return []
+    neg_ys, neg_xs = np.where(neg_mask)
+    order = np.argsort(jac[neg_ys, neg_xs])
+    neg_ys, neg_xs = neg_ys[order], neg_xs[order]
+    shown = []
+    for cy, cx in zip(neg_ys, neg_xs):
+        if len(shown) >= max_panels:
+            break
+        if cy < margin or cy >= H - margin or cx < margin or cx >= W - margin:
+            continue
+        if any(abs(cy - sy) <= dedup_dist and abs(cx - sx) <= dedup_dist
+               for sy, sx in shown):
+            continue
+        shown.append((cy, cx))
+    return shown
+
+
+def _draw_grid_patch(ax, def_x, def_y, jac_patch, norm, cmap,
+                     ref_x=None, ref_y=None, label_vertices=False,
+                     y0=0, x0=0):
+    """Draw a deformed grid patch on *ax*.
+
+    Parameters
+    ----------
+    def_x, def_y : ndarray, shape ``(rows, cols)``
+        Deformed vertex positions.
+    jac_patch : ndarray, shape ``(rows-1, cols-1)`` or None
+        Jacobian determinant per cell.  If None, cells are not filled.
+    ref_x, ref_y : ndarray or None
+        If given, draw an undeformed reference grid (thin gray dashes).
+    label_vertices : bool
+        If True, label each vertex with its ``(row, col)`` grid index.
+    """
+    rows, cols = def_x.shape
+
+    # --- reference grid (undeformed) ---
+    if ref_x is not None:
+        for i in range(rows):
+            ax.plot(ref_x[i, :], ref_y[i, :], color='#bbbbbb',
+                    linestyle='--', linewidth=0.8, zorder=0)
+        for j in range(cols):
+            ax.plot(ref_x[:, j], ref_y[:, j], color='#bbbbbb',
+                    linestyle='--', linewidth=0.8, zorder=0)
+
+    # --- filled quads ---
+    if jac_patch is not None:
+        nr, nc = jac_patch.shape
+        for i in range(nr):
+            for j in range(nc):
+                corners = [
+                    (def_x[i, j],     def_y[i, j]),
+                    (def_x[i, j+1],   def_y[i, j+1]),
+                    (def_x[i+1, j+1], def_y[i+1, j+1]),
+                    (def_x[i+1, j],   def_y[i+1, j]),
+                ]
+                jval = jac_patch[i, j]
+                fc = cmap(norm(jval))
+                is_neg = jval <= 0
+                poly = Polygon(
+                    corners, closed=True,
+                    facecolor=(*fc[:3], 0.55 if is_neg else 0.18),
+                    edgecolor='yellow' if is_neg else 'none',
+                    linewidth=2.0 if is_neg else 0,
+                    zorder=1)
+                ax.add_patch(poly)
+
+    # --- grid lines ---
+    for i in range(rows):
+        ax.plot(def_x[i, :], def_y[i, :], 'k-', linewidth=1.5, zorder=2)
+    for j in range(cols):
+        ax.plot(def_x[:, j], def_y[:, j], 'k-', linewidth=1.5, zorder=2)
+
+    # --- vertex dots + optional labels ---
+    ax.plot(def_x.ravel(), def_y.ravel(), 'ko', markersize=4, zorder=3)
+
+    if label_vertices:
+        for i in range(rows):
+            for j in range(cols):
+                ax.annotate(
+                    f"{y0+i},{x0+j}", (def_x[i, j], def_y[i, j]),
+                    textcoords="offset points", xytext=(4, 4),
+                    fontsize=6, color='#555555', zorder=4)
+
+
+def plot_checkerboard_before_after(deformation_i, phi_corrected, figsize=None,
+                                   title="", max_panels=4, half_win=1):
+    """Three-column folding close-up: Reference | Initial | Corrected.
+
+    For each negative-Jdet region, extracts a ``(2*half_win+1)``-vertex
+    neighbourhood and draws:
+
+    * **Reference** — the regular (undeformed) grid.
+    * **Initial** — deformed grid with Jdet-coloured fills.  Negative cells
+      are blue with yellow outline.  The reference grid is drawn underneath
+      in light gray dashes so the viewer can see how vertices have moved.
+      Vertices are labelled with their ``(row,col)`` grid index so
+      crossings are obvious (vertex order reversal = folding).
+    * **Corrected** — same layout after correction.
+
+    Parameters
+    ----------
+    deformation_i : ndarray, shape ``(3, 1, H, W)``
+    phi_corrected : ndarray, shape ``(2, H, W)``
+    half_win : int
+        Half-window in vertices around the centre pixel.  ``2`` →
+        5×5 vertices (4×4 cells).
+    """
+    _, _, H, W = deformation_i.shape
+    phi_init = np.stack([deformation_i[1, 0], deformation_i[2, 0]])
+    jac_init = np.squeeze(jacobian_det2D(phi_init))
+    jac_corr = np.squeeze(jacobian_det2D(phi_corrected))
+
+    shown = _find_neg_jdet_centers(jac_init, H, W, margin=half_win,
+                                   max_panels=max_panels,
+                                   dedup_dist=2 * half_win)
+    if not shown:
+        return
+
+    n = len(shown)
+    if figsize is None:
+        figsize = (14, 4.2 * n)
+    fig, axes = plt.subplots(n, 3, figsize=figsize, squeeze=False)
+
+    vmin = min(float(jac_init.min()), -0.5)
+    vmax = max(float(jac_init.max()), float(jac_corr.max()), 1.5)
+    norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+    cmap = plt.get_cmap('bwr')
+
+    for idx, (cy, cx) in enumerate(shown):
+        y0 = cy - half_win
+        y1 = cy + half_win + 1
+        x0 = cx - half_win
+        x1 = cx + half_win + 1
+
+        # Reference (undeformed) vertex positions
+        ref_yy, ref_xx = np.mgrid[y0:y1, x0:x1].astype(float)
+
+        def _deformed(phi):
+            dy = phi[0][y0:y1, x0:x1]
+            dx = phi[1][y0:y1, x0:x1]
+            return ref_xx + dx, ref_yy + dy
+
+        ix, iy = _deformed(phi_init)
+        cx_, cy_ = _deformed(phi_corrected)
+
+        jac_init_patch = jac_init[y0:y1-1, x0:x1-1]
+        jac_corr_patch = jac_corr[y0:y1-1, x0:x1-1]
+
+        # Shared axis limits across all 3 panels
+        all_x = np.concatenate([ref_xx.ravel(), ix.ravel(), cx_.ravel()])
+        all_y = np.concatenate([ref_yy.ravel(), iy.ravel(), cy_.ravel()])
+        pad = 0.8
+        xlim = (all_x.min() - pad, all_x.max() + pad)
+        ylim = (all_y.max() + pad, all_y.min() - pad)
+
+        # --- Column 0: Reference grid ---
+        ax0 = axes[idx, 0]
+        _draw_grid_patch(ax0, ref_xx, ref_yy, jac_patch=None,
+                         norm=norm, cmap=cmap, label_vertices=True,
+                         y0=y0, x0=x0)
+        ax0.set_xlim(xlim); ax0.set_ylim(ylim)
+        ax0.set_aspect('equal')
+        n_neg = int((jac_init_patch <= 0).sum())
+        ax0.set_title(f"Reference grid  ({y0}:{y1-1}, {x0}:{x1-1})",
+                      fontsize=9)
+
+        # --- Column 1: Initial (folded) ---
+        ax1 = axes[idx, 1]
+        _draw_grid_patch(ax1, ix, iy, jac_patch=jac_init_patch,
+                         norm=norm, cmap=cmap,
+                         ref_x=ref_xx, ref_y=ref_yy,
+                         label_vertices=True, y0=y0, x0=x0)
+        ax1.set_xlim(xlim); ax1.set_ylim(ylim)
+        ax1.set_aspect('equal')
+        ax1.set_title(
+            f"Initial — {n_neg} neg-Jdet  (min={jac_init[cy,cx]:.2f})",
+            fontsize=9)
+
+        # --- Column 2: Corrected ---
+        ax2 = axes[idx, 2]
+        _draw_grid_patch(ax2, cx_, cy_, jac_patch=jac_corr_patch,
+                         norm=norm, cmap=cmap,
+                         ref_x=ref_xx, ref_y=ref_yy,
+                         label_vertices=True, y0=y0, x0=x0)
+        ax2.set_xlim(xlim); ax2.set_ylim(ylim)
+        ax2.set_aspect('equal')
+        n_neg_c = int((jac_corr_patch <= 0).sum())
+        ax2.set_title(
+            f"Corrected — {n_neg_c} neg-Jdet  (min={jac_corr_patch.min():.2f})",
+            fontsize=9)
+
+    # Shared colour bar
+    sm = ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    fig.colorbar(sm, ax=axes.ravel().tolist(), label="Jacobian determinant",
+                 fraction=0.02, pad=0.03, shrink=0.7)
+
+    if title:
+        fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
+    fig.tight_layout()
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Correction displacement arrows: where did each vertex move?
+# ---------------------------------------------------------------------------
+def plot_neg_jdet_neighborhoods(deformation_i, phi_corrected, figsize=None,
+                                title="", max_panels=4, half_win=2):
+    """Per-region displacement arrows showing the correction applied.
+
+    For each negative-Jdet neighbourhood, draws two panels:
+
+    * **Left** — the initial deformed grid (thick black, Jdet-coloured fills)
+      with **green arrows** from each initial vertex position to its corrected
+      position.  Arrow length = magnitude of correction applied.
+    * **Right** — the corrected deformed grid (same style) with reference
+      grid and vertex labels.
+
+    This makes it easy to see *which vertices were moved and by how much*
+    to eliminate folding.
+
+    Parameters
+    ----------
+    deformation_i : ndarray, shape ``(3, 1, H, W)``
+    phi_corrected : ndarray, shape ``(2, H, W)``
+    half_win : int
+        Half-window in vertices.  ``2`` → 5×5 vertices (4×4 cells).
+    """
+    _, _, H, W = deformation_i.shape
+    phi_init = np.stack([deformation_i[1, 0], deformation_i[2, 0]])
+    jac_init = np.squeeze(jacobian_det2D(phi_init))
+    jac_corr = np.squeeze(jacobian_det2D(phi_corrected))
+
+    shown = _find_neg_jdet_centers(jac_init, H, W, margin=half_win,
+                                   max_panels=max_panels,
+                                   dedup_dist=2 * half_win)
+    if not shown:
+        return
+
+    n = len(shown)
+    if figsize is None:
+        figsize = (12, 5 * n)
+    fig, axes = plt.subplots(n, 2, figsize=figsize, squeeze=False)
+
+    vmin = min(float(jac_init.min()), -0.5)
+    vmax = max(float(jac_init.max()), float(jac_corr.max()), 1.5)
+    norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+    cmap = plt.get_cmap('bwr')
+
+    for idx, (cy, cx) in enumerate(shown):
+        y0 = cy - half_win
+        y1 = cy + half_win + 1
+        x0 = cx - half_win
+        x1 = cx + half_win + 1
+
+        ref_yy, ref_xx = np.mgrid[y0:y1, x0:x1].astype(float)
+
+        def _deformed(phi):
+            dy = phi[0][y0:y1, x0:x1]
+            dx = phi[1][y0:y1, x0:x1]
+            return ref_xx + dx, ref_yy + dy
+
+        ix, iy = _deformed(phi_init)
+        cx_, cy_ = _deformed(phi_corrected)
+
+        jac_init_patch = jac_init[y0:y1-1, x0:x1-1]
+        jac_corr_patch = jac_corr[y0:y1-1, x0:x1-1]
+
+        # Shared limits
+        all_x = np.concatenate([ref_xx.ravel(), ix.ravel(), cx_.ravel()])
+        all_y = np.concatenate([ref_yy.ravel(), iy.ravel(), cy_.ravel()])
+        pad = 0.8
+        xlim = (all_x.min() - pad, all_x.max() + pad)
+        ylim = (all_y.max() + pad, all_y.min() - pad)
+
+        # --- Left: initial grid + correction arrows ---
+        ax0 = axes[idx, 0]
+        _draw_grid_patch(ax0, ix, iy, jac_patch=jac_init_patch,
+                         norm=norm, cmap=cmap,
+                         ref_x=ref_xx, ref_y=ref_yy,
+                         label_vertices=True, y0=y0, x0=x0)
+
+        # Green arrows: initial → corrected vertex positions
+        dx_arrow = cx_ - ix
+        dy_arrow = cy_ - iy
+        mag = np.sqrt(dx_arrow**2 + dy_arrow**2)
+        for i in range(ix.shape[0]):
+            for j in range(ix.shape[1]):
+                if mag[i, j] > 0.01:
+                    ax0.annotate(
+                        "", xy=(cx_[i, j], cy_[i, j]),
+                        xytext=(ix[i, j], iy[i, j]),
+                        arrowprops=dict(arrowstyle='->', color='green',
+                                        lw=2.0, shrinkA=2, shrinkB=2),
+                        zorder=5)
+
+        ax0.set_xlim(xlim); ax0.set_ylim(ylim)
+        ax0.set_aspect('equal')
+        n_neg = int((jac_init_patch <= 0).sum())
+        ax0.set_title(
+            f"Initial + correction arrows  ({n_neg} neg-Jdet)",
+            fontsize=9)
+
+        # --- Right: corrected grid ---
+        ax1 = axes[idx, 1]
+        _draw_grid_patch(ax1, cx_, cy_, jac_patch=jac_corr_patch,
+                         norm=norm, cmap=cmap,
+                         ref_x=ref_xx, ref_y=ref_yy,
+                         label_vertices=True, y0=y0, x0=x0)
+        ax1.set_xlim(xlim); ax1.set_ylim(ylim)
+        ax1.set_aspect('equal')
+        n_neg_c = int((jac_corr_patch <= 0).sum())
+        ax1.set_title(
+            f"Corrected  ({n_neg_c} neg-Jdet, min={jac_corr_patch.min():.2f})",
+            fontsize=9)
+
+    # Legend
+    from matplotlib.lines import Line2D
+    legend_elems = [
+        Line2D([0], [0], color='#bbbbbb', linestyle='--', linewidth=1,
+               label='Reference (undeformed)'),
+        Line2D([0], [0], color='black', linestyle='-', linewidth=1.5,
+               label='Deformed grid'),
+        Line2D([0], [0], color='green', linestyle='-', linewidth=2,
+               marker='>', markersize=5,
+               label='Correction applied'),
+    ]
+    fig.legend(handles=legend_elems, loc='lower center', ncol=3,
+               fontsize=9, frameon=True)
+
+    if title:
+        fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
     plt.show()

@@ -6,7 +6,7 @@ Research codebase for correcting **negative Jacobian determinants** in 2D deform
 
 ## Core Data Conventions
 
-- **Deformation fields:** `(3, 1, H, W)` numpy arrays — channels are `[dz, dy, dx]`. For 2D slice work, the z-slice dimension is 1.
+- **Deformation fields:** `(3, 1, H, W)` numpy arrays — channels are `[dz, dy, dx]`. For 2D slice work, the z-slice dimension is 1. Convention is **pull-back** (backward mapping): for each point in the fixed image, the displacement vector points to where in the moving image that pixel's value comes from. I.e. `fixed_pos + displacement = moving_pos`.
 - **Points/coordinates:** Always `[z, y, x]` ordering. Correspondences are `(N, 3)` arrays.
 - **SimpleITK interop:** Displacement arrays are transposed `(3,1,H,W)` → `(1,H,W,3)` and axis-reordered `[2,1,0]` (zyx→xyz) before calling SimpleITK. See `modules/jacobian.py:sitk_jacobian_determinant()`.
 - **Jacobian computation (optimiser):** `dvfopt.py` uses a pure-numpy 2D Jacobian determinant (`_numpy_jdet_2d`) via `np.gradient` central differences. This matches SimpleITK for interior pixels and avoids the ~3 ms/call SimpleITK overhead that made SLSQP numerical gradients infeasible. `modules/jacobian.py` still provides the SimpleITK wrapper for other uses.
