@@ -154,6 +154,145 @@ def jacobian_constraint(phi_xy, submatrix_size, exclude_boundaries=True):
 
 
 # ---------------------------------------------------------------------------
+# Shoelace (geometric quad-area) helpers
+# ---------------------------------------------------------------------------
+def _shoelace_areas_2d(dy, dx):
+    """Signed area of each deformed quad cell via the shoelace formula.
+
+    Uses vertex order TL → TR → BR → BL, matching ``dvfviz._quad_signed_areas``.
+
+    Parameters
+    ----------
+    dy, dx : ndarray, shape ``(H, W)``
+        Displacement components.
+
+    Returns
+    -------
+    ndarray, shape ``(H-1, W-1)``
+    """
+    H, W = dy.shape
+    ref_y, ref_x = np.mgrid[:H, :W]
+    def_x = ref_x + dx
+    def_y = ref_y + dy
+
+    x0, y0 = def_x[:-1, :-1], def_y[:-1, :-1]   # TL
+    x1, y1 = def_x[:-1, 1:],  def_y[:-1, 1:]     # TR
+    x2, y2 = def_x[1:, 1:],   def_y[1:, 1:]      # BR
+    x3, y3 = def_x[1:, :-1],  def_y[1:, :-1]     # BL
+    return 0.5 * ((x0*y1 - x1*y0) + (x1*y2 - x2*y1)
+                  + (x2*y3 - x3*y2) + (x3*y0 - x0*y3))
+
+
+def shoelace_det2D(phi_xy):
+    """Compute shoelace quad-cell areas from a ``(2, H, W)`` phi array.
+
+    Returns shape ``(1, H-1, W-1)`` — analogous to ``jacobian_det2D``.
+    """
+    H, W = phi_xy.shape[-2:]
+    dy = phi_xy[0].reshape(H, W)
+    dx = phi_xy[1].reshape(H, W)
+    return _shoelace_areas_2d(dy, dx)[np.newaxis, :, :]
+
+
+def shoelace_constraint(phi_xy, submatrix_size, exclude_boundaries=True):
+    """Return flattened shoelace quad areas for optimiser constraints.
+
+    Analogous to ``jacobian_constraint`` but checks geometric cell areas
+    instead of gradient-based Jacobian determinants.
+    """
+    pixels = submatrix_size * submatrix_size
+    dx = phi_xy[:pixels].reshape((submatrix_size, submatrix_size))
+    dy = phi_xy[pixels:].reshape((submatrix_size, submatrix_size))
+    areas = _shoelace_areas_2d(dy, dx)
+    if exclude_boundaries:
+        return areas[1:-1, 1:-1].flatten()
+    else:
+        return areas.flatten()
+
+
+# ---------------------------------------------------------------------------
+# Monotonicity (global injectivity) helpers
+# ---------------------------------------------------------------------------
+def _monotonicity_diffs_2d(dy, dx):
+    """Forward-difference monotonicity metrics for deformed coordinates.
+
+    For a structured grid with unit spacing, deformed positions are
+    ``def_x[i,j] = j + dx[i,j]``.  Global injectivity (on the discrete
+    structured grid) is guaranteed when deformed coordinates are strictly
+    monotonic along both axes:
+
+    * ``h_mono[i,j] = 1 + dx[i,j+1] - dx[i,j] > 0``  (x increases along rows)
+    * ``v_mono[i,j] = 1 + dy[i+1,j] - dy[i,j] > 0``  (y increases along cols)
+
+    Returns ``(h_mono, v_mono)`` with shapes ``(H, W-1)`` and ``(H-1, W)``.
+    """
+    h_mono = 1.0 + np.diff(dx, axis=1)   # (H, W-1)
+    v_mono = 1.0 + np.diff(dy, axis=0)   # (H-1, W)
+    return h_mono, v_mono
+
+
+def injectivity_constraint(phi_xy, submatrix_size, exclude_boundaries=True):
+    """Return flattened monotonicity diffs for the SLSQP injectivity constraint.
+
+    All returned values must be > threshold for montonicity (and hence
+    global injectivity on the structured grid) to hold.
+    """
+    pixels = submatrix_size * submatrix_size
+    dx = phi_xy[:pixels].reshape((submatrix_size, submatrix_size))
+    dy = phi_xy[pixels:].reshape((submatrix_size, submatrix_size))
+    h_mono, v_mono = _monotonicity_diffs_2d(dy, dx)
+    if exclude_boundaries:
+        h_vals = h_mono[1:-1, 1:-1].flatten()
+        v_vals = v_mono[1:-1, 1:-1].flatten()
+    else:
+        h_vals = h_mono.flatten()
+        v_vals = v_mono.flatten()
+    return np.concatenate([h_vals, v_vals])
+
+
+def _quality_map(phi, enforce_shoelace, enforce_injectivity=False):
+    """Per-pixel quality metric combining gradient-Jdet and optional extras.
+
+    When both *enforce_shoelace* and *enforce_injectivity* are ``False``,
+    returns ``jacobian_det2D(phi)``.  Otherwise, each active metric is
+    spread to per-pixel values and the element-wise minimum is returned
+    so that the worst violation drives pixel selection and convergence.
+
+    Returns shape ``(1, H, W)`` — same as ``jacobian_det2D``.
+    """
+    jdet = jacobian_det2D(phi)
+    if not enforce_shoelace and not enforce_injectivity:
+        return jdet
+    result = jdet.copy()
+    H, W = jdet.shape[1:]
+
+    if enforce_shoelace:
+        areas = shoelace_det2D(phi)           # (1, H-1, W-1)
+        shoe = np.full((1, H, W), np.inf)
+        a = areas[0]
+        shoe[0, :-1, :-1] = np.minimum(shoe[0, :-1, :-1], a)
+        shoe[0, :-1, 1:]  = np.minimum(shoe[0, :-1, 1:],  a)
+        shoe[0, 1:,  :-1] = np.minimum(shoe[0, 1:,  :-1], a)
+        shoe[0, 1:,  1:]  = np.minimum(shoe[0, 1:,  1:],  a)
+        result = np.minimum(result, shoe)
+
+    if enforce_injectivity:
+        dy = phi[0]
+        dx = phi[1]
+        h_mono, v_mono = _monotonicity_diffs_2d(dy, dx)
+        mono = np.full((1, H, W), np.inf)
+        # h_mono is (H, W-1): gap between col j and col j+1
+        mono[0, :, :-1] = np.minimum(mono[0, :, :-1], h_mono)
+        mono[0, :, 1:]  = np.minimum(mono[0, :, 1:],  h_mono)
+        # v_mono is (H-1, W): gap between row i and row i+1
+        mono[0, :-1, :] = np.minimum(mono[0, :-1, :], v_mono)
+        mono[0, 1:,  :] = np.minimum(mono[0, 1:,  :], v_mono)
+        result = np.minimum(result, mono)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Spatial helpers
 # ---------------------------------------------------------------------------
 def nearest_center(shape, submatrix_size):
@@ -286,25 +425,42 @@ def get_phi_sub_flat(phi, cz, cy, cx, shape, submatrix_size):
 # Shared constraint builder
 # ---------------------------------------------------------------------------
 def _build_constraints(phi_sub_flat, submatrix_size, is_at_edge,
-                       window_reached_max, threshold):
+                       window_reached_max, threshold, enforce_shoelace=False,
+                       enforce_injectivity=False):
     """Build SLSQP constraints for a sub-window optimisation.
 
     Returns a list of constraint objects suitable for
     ``scipy.optimize.minimize``.
+
+    When *enforce_shoelace* is ``True``, an additional
+    ``NonlinearConstraint`` requires all shoelace quad-cell areas to
+    exceed *threshold* as well.
+
+    When *enforce_injectivity* is ``True``, an additional
+    ``NonlinearConstraint`` enforces monotonicity of deformed coordinates
+    (sufficient condition for global injectivity on structured grids).
     """
-    if window_reached_max:
-        nlc = NonlinearConstraint(
-            lambda phi1: jacobian_constraint(phi1, submatrix_size, False),
-            threshold, np.inf,
-        )
-        return [nlc]
+    exclude_bounds = not is_at_edge and not window_reached_max
 
     nlc = NonlinearConstraint(
-        lambda phi1: jacobian_constraint(phi1, submatrix_size, not is_at_edge),
+        lambda phi1: jacobian_constraint(phi1, submatrix_size, exclude_bounds),
         threshold, np.inf,
     )
+    constraints = [nlc]
 
-    if not is_at_edge:
+    if enforce_shoelace:
+        constraints.append(NonlinearConstraint(
+            lambda phi1: shoelace_constraint(phi1, submatrix_size, exclude_bounds),
+            threshold, np.inf,
+        ))
+
+    if enforce_injectivity:
+        constraints.append(NonlinearConstraint(
+            lambda phi1: injectivity_constraint(phi1, submatrix_size, exclude_bounds),
+            threshold, np.inf,
+        ))
+
+    if exclude_bounds:
         edge_mask = np.zeros((submatrix_size, submatrix_size), dtype=bool)
         edge_mask[[0, -1], :] = True
         edge_mask[:, [0, -1]] = True
@@ -321,10 +477,9 @@ def _build_constraints(phi_sub_flat, submatrix_size, is_at_edge,
         for row, idx in enumerate(fixed_indices):
             A_eq[row, idx] = 1
 
-        linear_constraint = LinearConstraint(A_eq, fixed_values, fixed_values)
-        return [nlc, linear_constraint]
+        constraints.append(LinearConstraint(A_eq, fixed_values, fixed_values))
 
-    return [nlc]
+    return constraints
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +569,8 @@ def iterative_with_jacobians2(
     max_per_index_iter=None,
     max_minimize_iter=None,
     min_window_size=None,
+    enforce_shoelace=False,
+    enforce_injectivity=False,
 ):
     """Iterative SLSQP correction of negative Jacobian determinants.
 
@@ -439,6 +596,16 @@ def iterative_with_jacobians2(
     threshold, err_tol, max_iterations, max_per_index_iter,
     max_minimize_iter, min_window_size :
         Override the corresponding default parameters.
+    enforce_shoelace : bool
+        When ``True``, the optimiser also enforces positive shoelace
+        quad-cell areas (geometric fold detection) in addition to the
+        gradient-based Jacobian determinant.  Convergence and pixel
+        selection use both metrics.
+    enforce_injectivity : bool
+        When ``True``, the optimiser enforces monotonicity of deformed
+        coordinates along grid axes — a sufficient condition for global
+        injectivity on structured grids.  This is more restrictive than
+        Jacobian-only or shoelace enforcement.
 
     Returns
     -------
@@ -478,8 +645,11 @@ def iterative_with_jacobians2(
     _log(verbose, 1, f"[init] Grid {H}x{W}  |  threshold={threshold}  |  method={methodName}  |  min_window={min_window_size}")
     _log(verbose, 2, f"[init] deformation_i shape: {deformation_i.shape}, phi shape: {phi.shape}")
 
+    _use_quality = enforce_shoelace or enforce_injectivity
+
     # Initial Jacobian
     jacobian_matrix = jacobian_det2D(phi)
+    quality_matrix = _quality_map(phi, enforce_shoelace, enforce_injectivity) if _use_quality else jacobian_matrix
     init_neg = int((jacobian_matrix <= 0).sum())
     init_min = float(jacobian_matrix.min())
     min_jdet_list.append(init_min)
@@ -488,11 +658,11 @@ def iterative_with_jacobians2(
     _log(verbose, 1, f"[init] Neg-Jdet pixels: {init_neg}  |  min Jdet: {init_min:.6f}")
 
     iteration = 0
-    while iteration < max_iterations and (jacobian_matrix[0, 1:-1, 1:-1] <= threshold - err_tol).any():
+    while iteration < max_iterations and (quality_matrix[0, 1:-1, 1:-1] <= threshold - err_tol).any():
         iteration += 1
         window_reached_max = False
 
-        neg_index_tuple = argmin_excluding_edges(jacobian_matrix)
+        neg_index_tuple = argmin_excluding_edges(quality_matrix)
 
         submatrix_size = min_window_size
 
@@ -503,7 +673,7 @@ def iterative_with_jacobians2(
             or (
                 (not window_reached_max)
                 and per_index_iter < max_per_index_iter
-                and (jacobian_matrix[0, cy - d:cy + d_hi,
+                and (quality_matrix[0, cy - d:cy + d_hi,
                                      cx - d:cx + d_hi] < threshold - err_tol).any()
             )
         ):
@@ -530,7 +700,7 @@ def iterative_with_jacobians2(
             # If frozen edges contain negative Jdet the constraint is likely
             # infeasible — skip the expensive optimizer and grow immediately.
             if (not is_at_edge and not window_reached_max
-                    and not _frozen_edges_clean(jacobian_matrix, cy, cx,
+                    and not _frozen_edges_clean(quality_matrix, cy, cx,
                                                submatrix_size, threshold, err_tol)):
                 _log(verbose, 2, f"  [skip] Frozen edges have neg Jdet at win {submatrix_size} — growing")
                 if submatrix_size < max_window:
@@ -539,7 +709,9 @@ def iterative_with_jacobians2(
                 continue
 
             constraints = _build_constraints(
-                phi_sub_flat, submatrix_size, is_at_edge, window_reached_max, threshold
+                phi_sub_flat, submatrix_size, is_at_edge, window_reached_max, threshold,
+                enforce_shoelace=enforce_shoelace,
+                enforce_injectivity=enforce_injectivity,
             )
 
             # Run optimisation
@@ -557,6 +729,7 @@ def iterative_with_jacobians2(
             _apply_result(phi, result.x, cy, cx, submatrix_size)
 
             jacobian_matrix = jacobian_det2D(phi)
+            quality_matrix = _quality_map(phi, enforce_shoelace, enforce_injectivity) if _use_quality else jacobian_matrix
             cur_neg = int((jacobian_matrix <= 0).sum())
             cur_min = float(jacobian_matrix.min())
             num_neg_jac.append(cur_neg)
@@ -572,7 +745,7 @@ def iterative_with_jacobians2(
 
             error_list.append(np.sqrt(np.sum((phi - phi_init) ** 2)))
 
-            if cur_min > threshold - err_tol:
+            if float(quality_matrix[0, 1:-1, 1:-1].min()) > threshold - err_tol:
                 _log(verbose, 1, f"[done] All Jdet > threshold after iter {iteration}")
                 break
 
@@ -596,7 +769,7 @@ def iterative_with_jacobians2(
             from modules.dvfviz import plot_step_snapshot
             plot_step_snapshot(jacobian_matrix, iteration, cur_neg, cur_min)
 
-        if cur_min > threshold - err_tol:
+        if float(quality_matrix[0, 1:-1, 1:-1].min()) > threshold - err_tol:
             _log(verbose, 1, f"[done] All Jdet > threshold after iter {iteration}")
             break
 
@@ -653,11 +826,15 @@ def _optimize_single_window(
     threshold,
     max_minimize_iter,
     method_name,
+    enforce_shoelace=False,
+    enforce_injectivity=False,
 ):
     """Run SLSQP on one sub-window.  Returns ``(result_x, elapsed)``."""
 
     constraints = _build_constraints(
-        phi_sub_flat, submatrix_size, is_at_edge, window_reached_max, threshold
+        phi_sub_flat, submatrix_size, is_at_edge, window_reached_max, threshold,
+        enforce_shoelace=enforce_shoelace,
+        enforce_injectivity=enforce_injectivity,
     )
 
     t0 = time.time()
@@ -753,6 +930,8 @@ def _serial_fix_pixel(
     min_window_size, max_per_index_iter, max_minimize_iter,
     max_window, threshold, err_tol, methodName, verbose,
     error_list, num_neg_jac, min_jdet_list, iter_times,
+    enforce_shoelace=False,
+    enforce_injectivity=False,
 ):
     """Fix a single pixel using the serial adaptive-window inner loop.
 
@@ -762,10 +941,13 @@ def _serial_fix_pixel(
     hits the grid boundary.
 
     Mutates *phi*, *jacobian_matrix*, and the accumulator lists in-place,
-    returns the updated jacobian_matrix.
+    returns the updated (quality_matrix, submatrix_size, per_index_iter).
     """
     # Adaptive starting size from negative-Jdet bounding box
     submatrix_size = min_window_size
+
+    _use_quality = enforce_shoelace or enforce_injectivity
+    quality_matrix = _quality_map(phi, enforce_shoelace, enforce_injectivity) if _use_quality else jacobian_matrix
 
     per_index_iter = 0
     window_reached_max = False
@@ -775,7 +957,7 @@ def _serial_fix_pixel(
         or (
             (not window_reached_max)
             and per_index_iter < max_per_index_iter
-            and (jacobian_matrix[0,
+            and (quality_matrix[0,
                     cy - d:cy + d_hi,
                     cx - d:cx + d_hi]
                  < threshold - err_tol).any()
@@ -798,7 +980,7 @@ def _serial_fix_pixel(
 
         # Skip optimizer if frozen edges have negative Jdet (likely infeasible)
         if (not is_at_edge and not window_reached_max
-                and not _frozen_edges_clean(jacobian_matrix, cy, cx,
+                and not _frozen_edges_clean(quality_matrix, cy, cx,
                                            submatrix_size, threshold, err_tol)):
             if submatrix_size < max_window:
                 submatrix_size += 2
@@ -810,19 +992,22 @@ def _serial_fix_pixel(
             phi_sub_flat, phi_init_sub_flat, submatrix_size,
             is_at_edge, window_reached_max,
             threshold, max_minimize_iter, methodName,
+            enforce_shoelace=enforce_shoelace,
+            enforce_injectivity=enforce_injectivity,
         )
         iter_times.append(elapsed)
 
         _apply_result(phi, result_x, cy, cx, submatrix_size)
 
         jacobian_matrix = jacobian_det2D(phi)
+        quality_matrix = _quality_map(phi, enforce_shoelace, enforce_injectivity) if _use_quality else jacobian_matrix
         cur_neg = int((jacobian_matrix <= 0).sum())
         cur_min = float(jacobian_matrix.min())
         num_neg_jac.append(cur_neg)
         min_jdet_list.append(cur_min)
         error_list.append(np.sqrt(np.sum((phi - phi_init) ** 2)))
 
-        if cur_min > threshold - err_tol:
+        if float(quality_matrix[0, 1:-1, 1:-1].min()) > threshold - err_tol:
             break
 
         # Grow window for next sub-iteration
@@ -832,7 +1017,7 @@ def _serial_fix_pixel(
         else:
             window_reached_max = True
 
-    return jacobian_matrix, submatrix_size, per_index_iter
+    return quality_matrix, submatrix_size, per_index_iter
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +1036,8 @@ def iterative_parallel(
     max_minimize_iter=None,
     min_window_size=None,
     max_workers=None,
+    enforce_shoelace=False,
+    enforce_injectivity=False,
 ):
     """Hybrid serial/parallel iterative SLSQP correction.
 
@@ -862,6 +1049,12 @@ def iterative_parallel(
     ----------
     max_workers : int or None
         Number of worker processes.  ``None`` → ``os.cpu_count()``.
+    enforce_shoelace : bool
+        When ``True``, also enforce positive shoelace quad-cell areas
+        (geometric fold detection) alongside gradient-based Jacobian.
+    enforce_injectivity : bool
+        When ``True``, enforce monotonicity of deformed coordinates
+        (sufficient condition for global injectivity on structured grids).
 
     Returns
     -------
@@ -905,7 +1098,10 @@ def iterative_parallel(
          f"[init] Grid {H}x{W}  |  threshold={threshold}  "
          f"|  method={methodName}  |  workers={max_workers}  |  min_window={min_window_size}")
 
+    _use_quality = enforce_shoelace or enforce_injectivity
+
     jacobian_matrix = jacobian_det2D(phi)
+    quality_matrix = _quality_map(phi, enforce_shoelace, enforce_injectivity) if _use_quality else jacobian_matrix
     init_neg = int((jacobian_matrix <= 0).sum())
     init_min = float(jacobian_matrix.min())
     min_jdet_list.append(init_min)
@@ -924,10 +1120,10 @@ def iterative_parallel(
 
     try:
         while (iteration < max_iterations
-               and (jacobian_matrix[0, 1:-1, 1:-1] <= threshold - err_tol).any()):
+               and (quality_matrix[0, 1:-1, 1:-1] <= threshold - err_tol).any()):
             iteration += 1
 
-            neg_pixels = _find_negative_pixels(jacobian_matrix, threshold, err_tol)
+            neg_pixels = _find_negative_pixels(quality_matrix, threshold, err_tol)
             if not neg_pixels:
                 break
 
@@ -944,7 +1140,7 @@ def iterative_parallel(
                 else:
                     # Adaptive starting size from bounding box
                     bbox_size = neg_jdet_bounding_window(
-                        jacobian_matrix, px, threshold, err_tol, min_window_size
+                        quality_matrix, px, threshold, err_tol, min_window_size
                     )
                     pixel_window_sizes[px] = bbox_size
                 pixel_window_sizes[px] = min(pixel_window_sizes[px], max_window)
@@ -966,15 +1162,18 @@ def iterative_parallel(
                      f"fix ({neg_idx[0]:3d},{neg_idx[1]:3d})  "
                      f"neg_pixels={len(neg_pixels)}")
 
-                jacobian_matrix, sub_size, sub_iters = _serial_fix_pixel(
+                quality_matrix, sub_size, sub_iters = _serial_fix_pixel(
                     neg_idx, phi, phi_init, jacobian_matrix,
                     slice_shape, near_cent_dict, window_counts,
                     min_window_size, max_per_index_iter,
                     max_minimize_iter, max_window,
                     threshold, err_tol, methodName, verbose,
                     error_list, num_neg_jac, min_jdet_list, iter_times,
+                    enforce_shoelace=enforce_shoelace,
+                    enforce_injectivity=enforce_injectivity,
                 )
 
+                jacobian_matrix = jacobian_det2D(phi)
                 cur_neg = int((jacobian_matrix <= 0).sum())
                 cur_min = float(jacobian_matrix.min())
                 cur_err = error_list[-1] if error_list else 0.0
@@ -1016,6 +1215,8 @@ def iterative_parallel(
                         phi_sub_flat, phi_init_sub_flat, sub_size,
                         is_at_edge, window_reached_max,
                         threshold, max_minimize_iter, methodName,
+                        enforce_shoelace,
+                        enforce_injectivity,
                     )
                     futures[fut] = (neg_idx, cz, cy, cx, sub_size)
 
@@ -1029,6 +1230,7 @@ def iterative_parallel(
                 iter_times.append(batch_time)
 
                 jacobian_matrix = jacobian_det2D(phi)
+                quality_matrix = _quality_map(phi, enforce_shoelace, enforce_injectivity) if _use_quality else jacobian_matrix
                 cur_neg = int((jacobian_matrix <= 0).sum())
                 cur_min = float(jacobian_matrix.min())
                 num_neg_jac.append(cur_neg)
@@ -1047,7 +1249,7 @@ def iterative_parallel(
                 cur_min = float(jacobian_matrix.min())
                 plot_step_snapshot(jacobian_matrix, iteration, cur_neg, cur_min)
 
-            if float(jacobian_matrix.min()) > threshold - err_tol:
+            if float(quality_matrix[0, 1:-1, 1:-1].min()) > threshold - err_tol:
                 _log(verbose, 1,
                      f"[done] All Jdet > threshold after iter {iteration}")
                 break

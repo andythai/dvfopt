@@ -846,6 +846,20 @@ def plot_grid_before_after(deformation_i, phi_corrected, figsize=(14, 6),
 # ---------------------------------------------------------------------------
 # Folding close-up: reference grid vs deformed grid
 # ---------------------------------------------------------------------------
+def _quad_signed_areas(def_x, def_y):
+    """Shoelace-formula signed area for each quad cell.
+
+    Returns shape ``(rows-1, cols-1)``.  Positive = non-folded (consistent
+    winding with the TL→TR→BR→BL vertex order used by ``_draw_grid_patch``).
+    """
+    x0, y0 = def_x[:-1, :-1], def_y[:-1, :-1]
+    x1, y1 = def_x[:-1, 1:],  def_y[:-1, 1:]
+    x2, y2 = def_x[1:, 1:],   def_y[1:, 1:]
+    x3, y3 = def_x[1:, :-1],  def_y[1:, :-1]
+    return 0.5 * ((x0*y1 - x1*y0) + (x1*y2 - x2*y1)
+                + (x2*y3 - x3*y2) + (x3*y0 - x0*y3))
+
+
 def _find_neg_jdet_centers(jac, H, W, margin, max_panels, dedup_dist):
     """Find deduplicated neg-Jdet pixel centres, worst-first."""
     neg_mask = jac <= 0
@@ -869,7 +883,7 @@ def _find_neg_jdet_centers(jac, H, W, margin, max_panels, dedup_dist):
 
 def _draw_grid_patch(ax, def_x, def_y, jac_patch, norm, cmap,
                      ref_x=None, ref_y=None, label_vertices=False,
-                     y0=0, x0=0):
+                     y0=0, x0=0, color_by_direction=False):
     """Draw a deformed grid patch on *ax*.
 
     Parameters
@@ -877,22 +891,29 @@ def _draw_grid_patch(ax, def_x, def_y, jac_patch, norm, cmap,
     def_x, def_y : ndarray, shape ``(rows, cols)``
         Deformed vertex positions.
     jac_patch : ndarray, shape ``(rows-1, cols-1)`` or None
-        Jacobian determinant per cell.  If None, cells are not filled.
+        Per-cell value (Jdet or signed area).  If None, cells are not filled.
     ref_x, ref_y : ndarray or None
         If given, draw an undeformed reference grid (thin gray dashes).
     label_vertices : bool
         If True, label each vertex with its ``(row, col)`` grid index.
+    color_by_direction : bool
+        If True, draw row-lines in blue and column-lines in red so that
+        line crossings (= folding) are immediately visible.  Only
+        negative-area cells are filled (yellow highlight).
     """
     rows, cols = def_x.shape
+
+    ROW_COLOR = '#2166ac'   # steel blue — row (horizontal) lines
+    COL_COLOR = '#b2182b'   # crimson    — column (vertical) lines
 
     # --- reference grid (undeformed) ---
     if ref_x is not None:
         for i in range(rows):
-            ax.plot(ref_x[i, :], ref_y[i, :], color='#bbbbbb',
-                    linestyle='--', linewidth=0.8, zorder=0)
+            ax.plot(ref_x[i, :], ref_y[i, :], color='#cccccc',
+                    linestyle='--', linewidth=0.7, zorder=0)
         for j in range(cols):
-            ax.plot(ref_x[:, j], ref_y[:, j], color='#bbbbbb',
-                    linestyle='--', linewidth=0.8, zorder=0)
+            ax.plot(ref_x[:, j], ref_y[:, j], color='#cccccc',
+                    linestyle='--', linewidth=0.7, zorder=0)
 
     # --- filled quads ---
     if jac_patch is not None:
@@ -906,21 +927,40 @@ def _draw_grid_patch(ax, def_x, def_y, jac_patch, norm, cmap,
                     (def_x[i+1, j],   def_y[i+1, j]),
                 ]
                 jval = jac_patch[i, j]
-                fc = cmap(norm(jval))
                 is_neg = jval <= 0
-                poly = Polygon(
-                    corners, closed=True,
-                    facecolor=(*fc[:3], 0.55 if is_neg else 0.18),
-                    edgecolor='yellow' if is_neg else 'none',
-                    linewidth=2.0 if is_neg else 0,
-                    zorder=1)
-                ax.add_patch(poly)
+                if color_by_direction:
+                    # Only highlight folded cells
+                    if is_neg:
+                        poly = Polygon(
+                            corners, closed=True,
+                            facecolor=(1, 0.85, 0, 0.30),
+                            edgecolor='orange', linewidth=1.5,
+                            zorder=1)
+                        ax.add_patch(poly)
+                else:
+                    fc = cmap(norm(jval))
+                    poly = Polygon(
+                        corners, closed=True,
+                        facecolor=(*fc[:3], 0.55 if is_neg else 0.18),
+                        edgecolor='yellow' if is_neg else 'none',
+                        linewidth=2.0 if is_neg else 0,
+                        zorder=1)
+                    ax.add_patch(poly)
 
     # --- grid lines ---
-    for i in range(rows):
-        ax.plot(def_x[i, :], def_y[i, :], 'k-', linewidth=1.5, zorder=2)
-    for j in range(cols):
-        ax.plot(def_x[:, j], def_y[:, j], 'k-', linewidth=1.5, zorder=2)
+    if color_by_direction:
+        lw = 2.2
+        for i in range(rows):
+            ax.plot(def_x[i, :], def_y[i, :], color=ROW_COLOR,
+                    linewidth=lw, zorder=2, solid_capstyle='round')
+        for j in range(cols):
+            ax.plot(def_x[:, j], def_y[:, j], color=COL_COLOR,
+                    linewidth=lw, zorder=2, solid_capstyle='round')
+    else:
+        for i in range(rows):
+            ax.plot(def_x[i, :], def_y[i, :], 'k-', linewidth=1.5, zorder=2)
+        for j in range(cols):
+            ax.plot(def_x[:, j], def_y[:, j], 'k-', linewidth=1.5, zorder=2)
 
     # --- vertex dots + optional labels ---
     ax.plot(def_x.ravel(), def_y.ravel(), 'ko', markersize=4, zorder=3)
@@ -960,7 +1000,6 @@ def plot_checkerboard_before_after(deformation_i, phi_corrected, figsize=None,
     _, _, H, W = deformation_i.shape
     phi_init = np.stack([deformation_i[1, 0], deformation_i[2, 0]])
     jac_init = np.squeeze(jacobian_det2D(phi_init))
-    jac_corr = np.squeeze(jacobian_det2D(phi_corrected))
 
     shown = _find_neg_jdet_centers(jac_init, H, W, margin=half_win,
                                    max_panels=max_panels,
@@ -974,7 +1013,7 @@ def plot_checkerboard_before_after(deformation_i, phi_corrected, figsize=None,
     fig, axes = plt.subplots(n, 3, figsize=figsize, squeeze=False)
 
     vmin = min(float(jac_init.min()), -0.5)
-    vmax = max(float(jac_init.max()), float(jac_corr.max()), 1.5)
+    vmax = max(float(jac_init.max()), 1.5)
     norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
     cmap = plt.get_cmap('bwr')
 
@@ -995,8 +1034,9 @@ def plot_checkerboard_before_after(deformation_i, phi_corrected, figsize=None,
         ix, iy = _deformed(phi_init)
         cx_, cy_ = _deformed(phi_corrected)
 
-        jac_init_patch = jac_init[y0:y1-1, x0:x1-1]
-        jac_corr_patch = jac_corr[y0:y1-1, x0:x1-1]
+        # Geometric quad signed areas (matches what the viewer sees)
+        area_init = _quad_signed_areas(ix, iy)
+        area_corr = _quad_signed_areas(cx_, cy_)
 
         # Shared axis limits across all 3 panels
         all_x = np.concatenate([ref_xx.ravel(), ix.ravel(), cx_.ravel()])
@@ -1008,48 +1048,58 @@ def plot_checkerboard_before_after(deformation_i, phi_corrected, figsize=None,
         # --- Column 0: Reference grid ---
         ax0 = axes[idx, 0]
         _draw_grid_patch(ax0, ref_xx, ref_yy, jac_patch=None,
-                         norm=norm, cmap=cmap, label_vertices=True,
-                         y0=y0, x0=x0)
+                         norm=norm, cmap=cmap,
+                         color_by_direction=True)
         ax0.set_xlim(xlim); ax0.set_ylim(ylim)
         ax0.set_aspect('equal')
-        n_neg = int((jac_init_patch <= 0).sum())
+        n_neg = int((area_init <= 0).sum())
         ax0.set_title(f"Reference grid  ({y0}:{y1-1}, {x0}:{x1-1})",
                       fontsize=9)
 
         # --- Column 1: Initial (folded) ---
         ax1 = axes[idx, 1]
-        _draw_grid_patch(ax1, ix, iy, jac_patch=jac_init_patch,
+        _draw_grid_patch(ax1, ix, iy, jac_patch=area_init,
                          norm=norm, cmap=cmap,
                          ref_x=ref_xx, ref_y=ref_yy,
-                         label_vertices=True, y0=y0, x0=x0)
+                         color_by_direction=True)
         ax1.set_xlim(xlim); ax1.set_ylim(ylim)
         ax1.set_aspect('equal')
         ax1.set_title(
-            f"Initial — {n_neg} neg-Jdet  (min={jac_init[cy,cx]:.2f})",
+            f"Initial — {n_neg} folded  (min area={area_init.min():.2f})",
             fontsize=9)
 
         # --- Column 2: Corrected ---
         ax2 = axes[idx, 2]
-        _draw_grid_patch(ax2, cx_, cy_, jac_patch=jac_corr_patch,
+        _draw_grid_patch(ax2, cx_, cy_, jac_patch=area_corr,
                          norm=norm, cmap=cmap,
                          ref_x=ref_xx, ref_y=ref_yy,
-                         label_vertices=True, y0=y0, x0=x0)
+                         color_by_direction=True)
         ax2.set_xlim(xlim); ax2.set_ylim(ylim)
         ax2.set_aspect('equal')
-        n_neg_c = int((jac_corr_patch <= 0).sum())
+        n_neg_c = int((area_corr <= 0).sum())
         ax2.set_title(
-            f"Corrected — {n_neg_c} neg-Jdet  (min={jac_corr_patch.min():.2f})",
+            f"Corrected — {n_neg_c} folded  (min area={area_corr.min():.2f})",
             fontsize=9)
 
-    # Shared colour bar
-    sm = ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    fig.colorbar(sm, ax=axes.ravel().tolist(), label="Jacobian determinant",
-                 fraction=0.02, pad=0.03, shrink=0.7)
+    # Legend
+    from matplotlib.lines import Line2D
+    legend_elems = [
+        Line2D([0], [0], color='#cccccc', linestyle='--', linewidth=1,
+               label='Reference (undeformed)'),
+        Line2D([0], [0], color='#2166ac', linestyle='-', linewidth=2.2,
+               label='Row lines (horizontal)'),
+        Line2D([0], [0], color='#b2182b', linestyle='-', linewidth=2.2,
+               label='Column lines (vertical)'),
+        Polygon([(0,0)], closed=True,
+                facecolor=(1, 0.85, 0, 0.30), edgecolor='orange',
+                linewidth=1.5, label='Folded cell'),
+    ]
+    fig.legend(handles=legend_elems, loc='lower center', ncol=4,
+               fontsize=9, frameon=True)
 
     if title:
         fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
     plt.show()
 
 
@@ -1081,7 +1131,6 @@ def plot_neg_jdet_neighborhoods(deformation_i, phi_corrected, figsize=None,
     _, _, H, W = deformation_i.shape
     phi_init = np.stack([deformation_i[1, 0], deformation_i[2, 0]])
     jac_init = np.squeeze(jacobian_det2D(phi_init))
-    jac_corr = np.squeeze(jacobian_det2D(phi_corrected))
 
     shown = _find_neg_jdet_centers(jac_init, H, W, margin=half_win,
                                    max_panels=max_panels,
@@ -1095,7 +1144,7 @@ def plot_neg_jdet_neighborhoods(deformation_i, phi_corrected, figsize=None,
     fig, axes = plt.subplots(n, 2, figsize=figsize, squeeze=False)
 
     vmin = min(float(jac_init.min()), -0.5)
-    vmax = max(float(jac_init.max()), float(jac_corr.max()), 1.5)
+    vmax = max(float(jac_init.max()), 1.5)
     norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
     cmap = plt.get_cmap('bwr')
 
@@ -1115,8 +1164,9 @@ def plot_neg_jdet_neighborhoods(deformation_i, phi_corrected, figsize=None,
         ix, iy = _deformed(phi_init)
         cx_, cy_ = _deformed(phi_corrected)
 
-        jac_init_patch = jac_init[y0:y1-1, x0:x1-1]
-        jac_corr_patch = jac_corr[y0:y1-1, x0:x1-1]
+        # Geometric quad signed areas (matches what the viewer sees)
+        area_init = _quad_signed_areas(ix, iy)
+        area_corr = _quad_signed_areas(cx_, cy_)
 
         # Shared limits
         all_x = np.concatenate([ref_xx.ravel(), ix.ravel(), cx_.ravel()])
@@ -1127,10 +1177,10 @@ def plot_neg_jdet_neighborhoods(deformation_i, phi_corrected, figsize=None,
 
         # --- Left: initial grid + correction arrows ---
         ax0 = axes[idx, 0]
-        _draw_grid_patch(ax0, ix, iy, jac_patch=jac_init_patch,
+        _draw_grid_patch(ax0, ix, iy, jac_patch=area_init,
                          norm=norm, cmap=cmap,
                          ref_x=ref_xx, ref_y=ref_yy,
-                         label_vertices=True, y0=y0, x0=x0)
+                         color_by_direction=True)
 
         # Green arrows: initial → corrected vertex positions
         dx_arrow = cx_ - ix
@@ -1148,36 +1198,38 @@ def plot_neg_jdet_neighborhoods(deformation_i, phi_corrected, figsize=None,
 
         ax0.set_xlim(xlim); ax0.set_ylim(ylim)
         ax0.set_aspect('equal')
-        n_neg = int((jac_init_patch <= 0).sum())
+        n_neg = int((area_init <= 0).sum())
         ax0.set_title(
-            f"Initial + correction arrows  ({n_neg} neg-Jdet)",
+            f"Initial + correction arrows  ({n_neg} folded)",
             fontsize=9)
 
         # --- Right: corrected grid ---
         ax1 = axes[idx, 1]
-        _draw_grid_patch(ax1, cx_, cy_, jac_patch=jac_corr_patch,
+        _draw_grid_patch(ax1, cx_, cy_, jac_patch=area_corr,
                          norm=norm, cmap=cmap,
                          ref_x=ref_xx, ref_y=ref_yy,
-                         label_vertices=True, y0=y0, x0=x0)
+                         color_by_direction=True)
         ax1.set_xlim(xlim); ax1.set_ylim(ylim)
         ax1.set_aspect('equal')
-        n_neg_c = int((jac_corr_patch <= 0).sum())
+        n_neg_c = int((area_corr <= 0).sum())
         ax1.set_title(
-            f"Corrected  ({n_neg_c} neg-Jdet, min={jac_corr_patch.min():.2f})",
+            f"Corrected  ({n_neg_c} folded, min area={area_corr.min():.2f})",
             fontsize=9)
 
     # Legend
     from matplotlib.lines import Line2D
     legend_elems = [
-        Line2D([0], [0], color='#bbbbbb', linestyle='--', linewidth=1,
+        Line2D([0], [0], color='#cccccc', linestyle='--', linewidth=1,
                label='Reference (undeformed)'),
-        Line2D([0], [0], color='black', linestyle='-', linewidth=1.5,
-               label='Deformed grid'),
+        Line2D([0], [0], color='#2166ac', linestyle='-', linewidth=2.2,
+               label='Row lines (horizontal)'),
+        Line2D([0], [0], color='#b2182b', linestyle='-', linewidth=2.2,
+               label='Column lines (vertical)'),
         Line2D([0], [0], color='green', linestyle='-', linewidth=2,
                marker='>', markersize=5,
                label='Correction applied'),
     ]
-    fig.legend(handles=legend_elems, loc='lower center', ncol=3,
+    fig.legend(handles=legend_elems, loc='lower center', ncol=4,
                fontsize=9, frameon=True)
 
     if title:

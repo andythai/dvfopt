@@ -1,0 +1,11 @@
+# Core scientific stack
+numpy
+scipy
+matplotlib
+pandas
+SimpleITK
+nibabel
+
+# VoxelMorph (install from GitHub — PyPI version has Python 3.11+ bug)
+# neurite is pulled automatically by voxelmorph (dev branch)
+voxelmorph @ git+https://github.com/voxelmorph/voxelmorph.git
