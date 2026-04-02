@@ -444,15 +444,37 @@ Defined in `testcases.py` as `SYNTHETIC_CASES`. Deformation fields constructed b
 
 $$\nabla^2 u = 0 \quad \text{(interior)}, \qquad u(\mathbf{p}_i) = \mathbf{m}_i - \mathbf{f}_i \quad \text{(correspondences)}$$
 
-Types include crossing vectors, opposing vectors, and checkerboard patterns on 10×10 and 20×20 grids.
+Types include crossing vectors, opposing vectors, and edge-distributed points on 10×10, 20×20, and 20×40 grids.
+
+| Case | Grid | Type | Preview |
+|------|------|------|---------|
+| `01a_10x10_crossing` | 10×10 | Crossing | ![Case 1a](docs/images/synthetic_01a_10x10_crossing.png) |
+| `01b_10x10_opposite` | 10×10 | Opposite | ![Case 1b](docs/images/synthetic_01b_10x10_opposite.png) |
+| `01c_20x40_edges` | 20×40 | Edge-distributed | ![Case 1c](docs/images/synthetic_01c_20x40_edges.png) |
+| `01d_20x40_crossing` | 20×40 | Crossing | ![Case 1d](docs/images/synthetic_01d_20x40_crossing.png) |
+| `03a_10x10_opposite` | 10×10 | Opposites (5 pts) | ![Case 3a](docs/images/synthetic_03a_10x10_opposite.png) |
+| `03b_10x10_crossing` | 10×10 | Crossing (8 pts) | ![Case 3b](docs/images/synthetic_03b_10x10_crossing.png) |
+| `03c_20x20_opposite` | 20×20 | Opposites (10 pts) | ![Case 3c](docs/images/synthetic_03c_20x20_opposite.png) |
+| `03d_20x20_crossing` | 20×20 | Crossing (24 pts) | ![Case 3d](docs/images/synthetic_03d_20x20_crossing.png) |
+
+Each image shows the Jacobian determinant heatmap (left, blue = negative/folding, red = positive) and displacement vector field (right). Black arrows on the left panel show correspondence vectors from moving (green) to fixed (violet) points.
 
 ### Random DVFs
 
 Generated via `generate_random_dvf(shape, max_magnitude)` — uniform random displacements optionally rescaled via bicubic interpolation (`scale_dvf`).
 
+| Case | Grid | Description | Preview |
+|------|------|-------------|---------|
+| `01e_20x20_random_spirals` | 20×20 | 5×5 random upscaled to 20×20 | ![Case 1e](docs/images/random_01e_20x20_random_spirals.png) |
+| `01f_20x20_random_seed_42` | 20×20 | Native 20×20 random (mag 3.0) | ![Case 1f](docs/images/random_01f_20x20_random_seed_42.png) |
+| `03a_10x10_random_seed_42` | 10×10 | 5×5 random upscaled to 10×10 | ![Case 3a random](docs/images/random_03a_10x10_random_seed_42.png) |
+| `03c_20x20_random_seed_42` | 20×20 | 5×5 random upscaled to 20×20 | ![Case 3c random](docs/images/random_03c_20x20_random_seed_42.png) |
+
+Upscaled cases (5×5 → larger) produce smooth spiral-like patterns via bicubic interpolation, while native-resolution cases have sharper, more localized folds.
+
 ### Real Data
 
-Axial slices from ANTs registration warps (`.npy` files), available at full resolution (320×456) and downscaled (64×91).
+Axial slices from ANTs registration warps (`.npy` files), available at full resolution (320×456) and downscaled (64×91). Real data files are not included in the repository — see `modules/testcases.py` for the `REAL_DATA_SLICES` configuration.
 
 ## Installation
 
