@@ -13,6 +13,8 @@ Correct **negative Jacobian determinants** (folding) in 2D and 3D displacement f
   - [Iterative SLSQP](#3-iterative-slsqp)
   - [Hybrid Parallel](#hybrid-parallel-variant)
 - [Constraints](#constraints)
+- [Convergence](#convergence)
+  - [Constraint Convergence](#constraint-convergence)
 - [3D Extension](#3d-extension)
 - [Data Conventions](#data-conventions)
 - [Project Structure](#project-structure)
@@ -245,6 +247,128 @@ $$(j + 1 + u_x[i, j+1]) - (j + u_x[i, j]) = 1 + u_x[i, j+1] - u_x[i, j]$$
 If this gap is positive, the right neighbor is still to the right after deformation — no crossing. If it goes to zero or negative, the two pixels have swapped order — a fold.
 
 **Why "sufficient but not necessary"?** Monotonicity along grid rows and columns guarantees injectivity, but there exist injective (non-folding) deformations where a pixel briefly moves past a neighbor along one axis while being pulled back by displacement along the other axis. Such fields would fail the monotonicity check even though they don't actually fold. In practice this is rare, and the constraint is useful as a stronger-than-needed guarantee when desired.
+
+## Convergence
+
+Each correction method has different convergence properties. Understanding _why_ they converge (or fail to) matters for choosing the right method and diagnosing stalled corrections.
+
+### Full-Grid SLSQP: Strongest guarantees
+
+The full-grid formulation is a standard nonlinear constrained optimization problem:
+
+$$\min_\phi \|\phi - \phi_{\text{init}}\|_2 \quad \text{s.t.} \quad J_{\det}(\phi) \geq \tau$$
+
+SLSQP (Sequential Least Squares Programming) solves this by iteratively building a local quadratic model of the objective and linear models of the constraints, then solving the resulting quadratic program (QP) at each step. It is a well-studied algorithm with convergence theory:
+
+- **Local convergence** is guaranteed when the objective is smooth, the constraints are smooth, and a _constraint qualification_ holds (roughly: the constraint gradients are not degenerate at the solution). All three hold here — the L2 norm is smooth, the Jacobian determinant is a smooth polynomial function of the displacement components, and constraint qualification holds generically (it would only fail in contrived degenerate configurations).
+- **Global convergence** (convergence from any starting point) is not formally guaranteed by SLSQP. However, because our starting point $\phi_{\text{init}}$ is the original deformation field — which is already a _good_ field everywhere except the folding regions — the optimizer starts very close to a feasible solution and rarely struggles.
+
+**When it can fail:** On very large grids, the number of optimization variables ($2 \times H \times W$) and constraints ($\approx H \times W$) becomes enormous. SLSQP must factor and solve a dense QP at each iteration, which scales poorly. It may hit the iteration limit (`max_minimize_iter = 1000`) before fully converging. The result will still be improved (fewer folds than the input) but may not be completely clean.
+
+**Why it works in practice:** The objective (L2 distance) has a single global minimum — it is convex. The constraint set (all fields with $J_{\det} \geq \tau$) is not convex in general (the Jacobian determinant is a polynomial, not a linear function of $\phi$), so the overall problem is non-convex. But in practice, the feasible region near $\phi_{\text{init}}$ is well-behaved because only small adjustments are needed. SLSQP finds the nearby feasible point efficiently.
+
+### Iterative SLSQP: Convergence via monotone progress
+
+The iterative method does not solve the global problem in one shot. Instead, it makes a sequence of local corrections, each solving a small windowed sub-problem. Convergence of the _overall_ process relies on three properties:
+
+**1. Each step is non-worsening.** The SLSQP sub-problem minimizes $\|\phi_{\text{window}} - \phi_{\text{init, window}}\|_2$ subject to $J_{\det} \geq \tau$ inside the window. The initial state of the window is always a feasible starting point for the L2 objective (it is just $\phi$ itself — which is the identity mapping at iteration 0 or the result of prior corrections). If SLSQP finds a better solution, it reduces the negative-Jdet count. If it fails to improve, the window grows and it tries again with more room to maneuver. The field is never made worse.
+
+**2. The window growth guarantees eventual coverage.** If a small window cannot resolve a fold (because the correction would need to "borrow" displacement from pixels outside the window), the algorithm grows the window by 2 pixels in each dimension and retries. This growth continues up to the full grid size. At that point it becomes the full-grid SLSQP problem, which has the same convergence properties described above. So the iterative method has the full-grid method as an ultimate fallback — it will never get permanently stuck at a window size.
+
+**3. The worst-first strategy ensures progress.** Each outer iteration targets the pixel with the _lowest_ Jacobian determinant. Fixing the worst pixel first ensures the most severe folds are addressed early. Once a fold is fixed, it stays fixed as long as later corrections don't disturb it — which the frozen-edge constraints are specifically designed to prevent.
+
+**When it can fail:** The iterative method is not globally optimal. Each windowed correction is locally optimal for that window, but separately-corrected overlapping regions can interfere. The L2 error of the iterative result is typically slightly higher than the full-grid result. In rare cases with dense, entangled folding regions that span most of the grid, the iterative approach may require many window-growth cycles before converging — eventually degenerating to full-grid SLSQP speed.
+
+**Frozen edges and local containment.** Freezing the boundary of each window is what makes the iterative approach work at all. Without it, fixing one fold could create a new one right outside the window, leading to an infinite chase. By keeping edges fixed, each correction is guaranteed to not introduce new folds in the surrounding field. The +1 pixel positive-border expansion ensures the frozen edges themselves satisfy the constraint, so the sub-problem is always feasible.
+
+### Hybrid Parallel: Same guarantees, with escalation
+
+The parallel variant processes multiple non-overlapping windows per iteration. Since the windows don't overlap, the corrections are independent and the same non-worsening argument applies.
+
+**Escalation handles stalls.** If a parallel batch produces no improvement (the negative-Jdet count doesn't decrease), the algorithm forces all future windows to be at least 2 pixels larger. This escalation continues until windows are large enough to resolve the folds. In the limit, windows grow to full-grid size and the algorithm degrades to serial full-grid SLSQP — slow, but guaranteed to converge.
+
+**Non-overlapping batching is conservative.** The greedy batch selection only picks windows with no spatial overlap. This means corrections in one window cannot affect pixels in another window within the same batch. The tradeoff: smaller batches than theoretically possible (some non-interacting windows might be skipped if they geometrically overlap), but perfect independence.
+
+### Heuristic (NMVF): No convergence guarantee
+
+The heuristic replaces each negative-Jdet neighborhood with its local mean. This has **no formal convergence guarantee**:
+
+- **It can oscillate.** Smoothing a 3×3 patch around one negative pixel may push a neighbor's Jacobian determinant negative, which then gets smoothed in the next iteration, potentially recreating the original fold.
+- **It can stall.** If the folding pattern is symmetric, the mean of the neighborhood may be identical to the current displacement, producing no change.
+- **It does converge in practice** for most inputs, because local averaging acts as diffusion — it smooths out sharp displacement gradients that cause folds. Each iteration reduces the magnitude of local displacement differences, and eventually the field becomes smooth enough that no Jacobian determinant is negative.
+
+**Why use it despite weaker guarantees?** Speed. The heuristic requires no optimization solver — just array averaging — so each iteration is orders of magnitude faster than an SLSQP step. For fields with mild, sparse folding, it converges in a few iterations and produces an acceptable (if not minimal) correction.
+
+### Summary
+
+| Method | Convergence guarantee | Failure mode | Recovery mechanism |
+|--------|----------------------|-------------|--------------------|
+| Full-Grid SLSQP | Local (SLSQP theory) | Iteration limit on large grids | Increase `max_minimize_iter` |
+| Iterative SLSQP | Monotone progress + full-grid fallback | Dense entangled folds → slow | Window growth → full-grid |
+| Parallel SLSQP | Same as iterative + escalation | Stalled batches | Force window growth globally |
+| Heuristic (NMVF) | None (empirical) | Oscillation, stalling | Increase `max_iter`, accept higher L2 |
+
+### Constraint convergence
+
+The optimizer enforces constraints at every SLSQP iteration, but including more constraints changes the shape of the feasible region and therefore affects how (and whether) the algorithm converges.
+
+#### Jacobian determinant: the primary constraint
+
+The core constraint $J_{\det} \geq \tau$ defines a _nonlinear_ feasible region. The Jacobian determinant is a smooth polynomial of the displacement components (a product of first-order partial derivatives), so its gradient is well-defined everywhere and SLSQP can linearize it reliably.
+
+**Feasibility near the start.** The initial field $\phi_{\text{init}}$ is almost entirely feasible — only a handful of pixels violate $J_{\det} \geq \tau$. This means the optimizer starts right at (or very near) the boundary of the feasible set. SLSQP's active-set strategy works well in this regime: it identifies the few active constraints (the pixels that are just barely at $\tau$) and adjusts those, while the vast majority of constraints are inactive and free.
+
+**Constraint qualification.** SLSQP requires that the gradients of the active constraints are linearly independent at the solution (the _Linear Independence Constraint Qualification_, or LICQ). For the Jacobian determinant, each constraint is a polynomial over different combinations of neighboring pixels, so their gradients point in different directions. LICQ fails only in extremely degenerate configurations (e.g., a perfectly uniform displacement field where all partial derivatives are identical), which do not arise in practice.
+
+#### Frozen edges: always satisfiable, zero cost
+
+The frozen-edge constraint $\phi_k = \phi_k^{\text{init}}$ for boundary pixels is a linear equality constraint. It simply removes degrees of freedom from the problem — the optimizer never needs to iterate to satisfy it. The equality is enforced exactly at every SLSQP step via the QP sub-problem.
+
+**Impact on convergence:** Reducing the number of free variables makes the optimization _easier_, not harder. The QP has fewer unknowns, and the constraint Jacobian has fewer columns. The tradeoff is a smaller feasible region (less room to maneuver), which can require a larger window to find a correction. But the frozen edges themselves never cause convergence failure.
+
+**Compatibility with the Jacobian constraint.** The +1 pixel positive-border expansion (described in the [Iterative SLSQP method](#iterative-slsqp-near-optimal-l2-much-faster)) guarantees that the frozen edge pixels already satisfy $J_{\det} \geq \tau$. So the frozen edges and the Jacobian constraint never conflict — they are always simultaneously satisfiable at the starting point. This is important because SLSQP can fail if the initial point is infeasible for _all_ constraints simultaneously.
+
+#### Shoelace area: tighter but compatible
+
+Enabling `enforce_shoelace=True` adds a second `NonlinearConstraint` requiring all quad-cell signed areas to exceed $\tau$. This _tightens_ the feasible region — every field that satisfies the shoelace constraint also has positive Jacobian determinants (positive cell areas imply no local folding), but the converse is not always true. Some fields with positive Jacobian at all four corners of a cell can still have a self-intersecting ("bowtie") quad, which the shoelace constraint catches.
+
+**How it affects convergence:**
+
+- **The feasible region shrinks.** There are fewer deformation fields that satisfy both constraints simultaneously. This means the optimizer may need more iterations or larger windows to find a correction, because the "room to adjust" is smaller.
+- **The constraint functions are smooth.** The shoelace area is a polynomial of the same form as the Jacobian determinant (products of deformed coordinates). Its gradient exists everywhere and is well-conditioned. SLSQP linearizes it just as easily.
+- **Constraint interactions.** With two nonlinear constraints active at the same pixel neighborhood, SLSQP must satisfy both simultaneously. It can happen that the Jacobian-only solution places a quad right at the edge of self-intersection — adding the shoelace constraint pushes the optimizer to a slightly different (slightly higher L2 error) solution. This is a genuine change in the optimum, not a convergence failure.
+- **LICQ still holds.** The shoelace gradient involves different combinations of vertex positions than the Jacobian gradient (cell-level vs. pixel-level central differences). As long as the two constraints don't become redundant (which they generically don't), their combined constraint Jacobian has full rank and SLSQP's convergence theory applies.
+
+**In the quality map,** when shoelace is enabled, the per-pixel quality metric is the element-wise minimum of the Jacobian determinant and the worst shoelace area touching each pixel. This ensures that the worst-first targeting in the iterative methods correctly identifies violations of _either_ constraint, not just the Jacobian.
+
+#### Injectivity (monotonicity): the strictest constraint
+
+Enabling `enforce_injectivity=True` adds constraints enforcing:
+
+$$1 + u_x[i, j+1] - u_x[i, j] \geq \tau \quad \text{and} \quad 1 + u_y[i+1, j] - u_y[i, j] \geq \tau$$
+
+This is the tightest constraint available. Every injective field has positive Jacobian determinant and positive shoelace areas, but the reverse is not true — monotonicity is a strict subset. The feasible region is the smallest of all three.
+
+**How it affects convergence:**
+
+- **More constraints, same smoothness.** The monotonicity differences are _linear_ functions of the displacement components (just a subtraction of neighboring values plus 1). Their gradients are constant and sparse (each constraint involves exactly two optimization variables). This means the constraint Jacobian is extremely well-conditioned — in fact, it is a constant matrix. SLSQP never struggles with these linearizations; they are exact.
+- **Tighter feasibility = harder satisfaction.** The optimizer has less room to maneuver. In fields with large displacement gradients (e.g., near sharp boundaries in medical images), monotonicity may require substantial corrections — moving multiple pixels to preserve ordering — which increases L2 error. On small windows, the correction may be infeasible entirely (there is no rearrangement of interior pixels that keeps edges frozen _and_ maintains monotonicity). Window growth handles this: with a larger window, there are more free pixels to distribute the deformation across.
+- **Infeasibility risk.** Unlike the Jacobian and shoelace constraints, monotonicity can conflict with frozen edges in tight spaces. Consider a 3×3 window where the center pixel needs to pass its neighbor — but the neighbor is frozen. No solution exists within the window. The SLSQP solver will report convergence failure for that sub-problem. The iterative algorithm handles this by growing the window (more free interior pixels) or, ultimately, falling back to full-grid optimization.
+- **Linear constraint interactions.** Since monotonicity constraints are linear and frozen-edge constraints are linear, their combined constraint set is a polyhedron (intersection of half-spaces). The Jacobian/shoelace constraints then carve out a nonlinear sub-region within that polyhedron. This layered structure is actually favorable for SLSQP: it can cheaply handle the linear constraints in the QP sub-problem and only needs to iterate on the nonlinear ones.
+
+**In the quality map,** monotonicity diffs are spread to per-pixel values (each pixel gets the worst horizontal or vertical diff it participates in), then element-wise minimized with the Jacobian and shoelace values. This unified quality metric ensures all three types of violations are captured by the worst-first pixel targeting.
+
+#### Combined constraints: summary
+
+| Constraint | Type | Feasible region | Impact on convergence | Failure mode |
+|-----------|------|----------------|----------------------|-------------|
+| Jacobian $\geq \tau$ | Nonlinear | Largest (no folds) | Mild — smooth, well-conditioned | Iteration limit on very large grids |
+| Frozen edges | Linear equality | Removes DOFs | Helps — smaller QP | None (always exact) |
+| + Shoelace $\geq \tau$ | Nonlinear | Tighter (no bowtie cells) | Moderate — may need more iterations | Rare, only at bowtie-only violations |
+| + Injectivity $\geq \tau$ | Linear | Tightest (strict ordering) | Stronger — may need larger windows | Infeasible small windows → window growth |
+| All three | Mixed | Smallest | Highest L2, slowest, most robust | Infeasible sub-windows → full-grid fallback |
+
+When all constraints are active, the optimizer converges to the minimum-L2 field that satisfies every condition simultaneously. Each added constraint only shrinks the feasible region, so the result is always at least as far from $\phi_{\text{init}}$ (higher L2 error) but geometrically more trustworthy.
 
 ## 3D Extension
 
