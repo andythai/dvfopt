@@ -48,7 +48,7 @@ The L2 norm objective ensures correction minimality — the optimizer finds the 
 
 For a displacement field with components $(u_x, u_y)$, the deformation gradient is:
 
-$$F = I + \nabla u = \begin{pmatrix} 1 + \frac{\partial u_x}{\partial x} & \frac{\partial u_x}{\partial y} \\[4pt] \frac{\partial u_y}{\partial x} & 1 + \frac{\partial u_y}{\partial y} \end{pmatrix}$$
+$$F = I + \nabla u = \begin{pmatrix} 1 + \frac{\partial u_x}{\partial x} & \frac{\partial u_x}{\partial y} \[4pt] \frac{\partial u_y}{\partial x} & 1 + \frac{\partial u_y}{\partial y} \end{pmatrix}$$
 
 The Jacobian determinant is the determinant of $F$:
 
