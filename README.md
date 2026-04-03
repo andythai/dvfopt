@@ -13,6 +13,7 @@ Correct **negative Jacobian determinants** (folding) in 2D and 3D displacement f
   - [Iterative SLSQP](#3-iterative-slsqp)
   - [Hybrid Parallel](#hybrid-parallel-variant)
 - [Constraints](#constraints)
+   - [Why Positive Jacobian Is Not Global Injectivity](#why-positive-jacobian-is-not-global-injectivity)
 - [Convergence](#convergence)
   - [Constraint Convergence](#constraint-convergence)
 - [3D Extension](#3d-extension)
@@ -129,7 +130,7 @@ The fastest but least accurate method. Replaces displacement vectors in the neig
 
 ### 2. Full-Grid SLSQP
 
-**Entry point:** `_full_grid_step()` in `modules/dvfopt.py`
+**Entry point:** `_full_grid_step()` in `dvfopt/core/solver.py`
 
 Optimizes the entire displacement field simultaneously via Sequential Least Squares Programming (SLSQP):
 
@@ -143,7 +144,7 @@ Optimizes the entire displacement field simultaneously via Sequential Least Squa
 
 ### 3. Iterative SLSQP
 
-**Entry point:** `iterative_with_jacobians2()` in `modules/dvfopt.py`
+**Entry point:** `iterative_with_jacobians2()` in `dvfopt/core/iterative.py`
 
 The primary method. Instead of optimizing the full grid, it repeatedly identifies the worst folding region and corrects it with a small local optimization:
 
@@ -178,7 +179,7 @@ The primary method. Instead of optimizing the full grid, it repeatedly identifie
 
 ### Hybrid Parallel Variant
 
-**Entry point:** `iterative_parallel()` in `modules/dvfopt.py`
+**Entry point:** `iterative_parallel()` in `dvfopt/core/parallel.py`
 
 Extends the iterative method to process multiple non-overlapping windows simultaneously:
 
@@ -204,6 +205,74 @@ Implemented as a `NonlinearConstraint` in SciPy's SLSQP. The threshold is strict
 **Why only interior pixels?** Edge pixels of the grid have one-sided finite differences (only one neighbor instead of two), making their Jacobian determinant less reliable. Constraining them would force the optimizer to satisfy a less accurate measurement. Interior pixels use symmetric central differences, giving a trustworthy value to constrain.
 
 **Why nonlinear?** The Jacobian determinant involves _products_ of displacement components (the $\frac{\partial u_x}{\partial x} \cdot \frac{\partial u_y}{\partial y}$ term), so it is a nonlinear function of the optimization variables. SLSQP handles this by locally linearizing the constraint at each iteration step.
+
+**Example result (Jacobian-only):** The 20×20 crossing case (`03d_20x20_crossing`) corrected with only the Jacobian constraint. Left shows the initial field with 30 negative-Jdet pixels (green contours), right shows the corrected field with all folds eliminated:
+
+![Jacobian-only constraint](docs/images/constraint_jacobian_only.png)
+
+### Why Positive Jacobian Is Not Global Injectivity
+
+The Jacobian determinant constraint is a **local** condition:
+
+$$\det(DF(x)) > 0$$
+
+means the map is locally orientation-preserving and locally invertible around each point $x$. But global injectivity requires:
+
+$$F(x_1) \neq F(x_2) \quad \forall x_1 \neq x_2$$
+
+which is a **global** one-to-one property over the whole domain. A map can satisfy $\det(DF)>0$ everywhere and still overlap distant regions (many-to-one globally).
+
+In practical terms for displacement correction: Jacobian positivity removes local flips/folds, but by itself does not prevent non-local self-overlap. This is exactly why optional global-geometric constraints (shoelace/injectivity) are useful.
+
+**Visual example (positive Jacobian, not injective):**
+
+Consider
+
+$$F(x, y) = (e^x \cos y,\; e^x \sin y), \quad (x, y) \in [0,1] \times [0, 2\pi].$$
+
+Its Jacobian determinant is
+
+$$\det(DF) = e^{2x} > 0,$$
+
+yet $F(x,0)=F(x,2\pi)$ for all $x$, so two different points map to the same location (non-injective globally).
+
+![Positive Jacobian but non-injective map](docs/images/positive_jacobian_not_injective.png)
+
+In the middle panel, the green and red boundary curves (domain rows $y=0$ and $y=2\pi$) overlap after mapping, even though the right panel shows strictly positive Jacobian values everywhere.
+
+**Computational example (reproducible):**
+
+```python
+import numpy as np
+
+nx, ny = 81, 121
+x = np.linspace(0.0, 1.0, nx)
+y = np.linspace(0.0, 2*np.pi, ny)
+X, Y = np.meshgrid(x, y, indexing='xy')
+
+U = np.exp(X) * np.cos(Y)
+V = np.exp(X) * np.sin(Y)
+J = np.exp(2 * X)  # det(DF)
+
+# Non-injectivity witness: top and bottom boundaries coincide
+boundary_diff = np.sqrt((U[0] - U[-1])**2 + (V[0] - V[-1])**2)
+
+print(f"min(detDF)={J.min():.6f}")
+print(f"max(detDF)={J.max():.6f}")
+print(f"max ||F(x,0)-F(x,2pi)|| = {boundary_diff.max():.3e}")
+print(f"overlapping boundary pairs (<1e-12): {(boundary_diff < 1e-12).sum()} / {nx}")
+```
+
+Expected output:
+
+```text
+min(detDF)=1.000000
+max(detDF)=7.389056
+max ||F(x,0)-F(x,2pi)|| = 6.658e-16
+overlapping boundary pairs (<1e-12): 81 / 81
+```
+
+So every sampled point has positive local Jacobian, while all paired boundary points overlap to machine precision.
 
 ### Frozen Edges (Linear)
 
@@ -231,6 +300,10 @@ where $(x_0, y_0), \ldots, (x_3, y_3)$ are the deformed quad vertices (TL, TR, B
 
 **The shoelace formula itself:** Imagine walking around the four corners of the deformed cell in order (TL → TR → BR → BL). At each step, compute the cross product of consecutive vertex positions. Sum them up and divide by 2 — you get the signed area of the polygon. If the polygon is traced counterclockwise, the area is positive. If the quad folds over and you end up tracing clockwise, the area goes negative.
 
+**Example result (Jacobian + Shoelace):** Top row shows Jacobian determinant before/after; bottom row shows the shoelace cell areas. The initial field has 30 negative-Jdet pixels and 72 negative-area cells. After correction, both metrics are fully positive:
+
+![Jacobian + Shoelace constraint](docs/images/constraint_jacobian_shoelace.png)
+
 ### Optional: Injectivity (Monotonicity)
 
 Forward-difference check ensuring the deformed grid remains monotonically ordered:
@@ -247,6 +320,25 @@ $$(j + 1 + u_x[i, j+1]) - (j + u_x[i, j]) = 1 + u_x[i, j+1] - u_x[i, j]$$
 If this gap is positive, the right neighbor is still to the right after deformation — no crossing. If it goes to zero or negative, the two pixels have swapped order — a fold.
 
 **Why "sufficient but not necessary"?** Monotonicity along grid rows and columns guarantees injectivity, but there exist injective (non-folding) deformations where a pixel briefly moves past a neighbor along one axis while being pulled back by displacement along the other axis. Such fields would fail the monotonicity check even though they don't actually fold. In practice this is rare, and the constraint is useful as a stronger-than-needed guarantee when desired.
+
+**Example result (Jacobian + Injectivity):** Top row shows Jacobian determinant before/after; bottom row shows the per-pixel worst monotonicity diff. Initially 48 pixels violate monotonicity (more than the 30 negative-Jdet pixels, since monotonicity is stricter). After correction, all diffs are positive:
+
+![Jacobian + Injectivity constraint](docs/images/constraint_jacobian_injectivity.png)
+
+### Constraint Comparison
+
+All constraint configurations applied to the same test case (`03d_20x20_crossing`, 24 crossing correspondences on a 20×20 grid):
+
+| Constraints | Neg Jdet | Neg Shoelace | Neg Mono | L2 Error | Time |
+|------------|---------|-------------|---------|---------|------|
+| Jacobian only | 30 → 0 | — | — | 7.53 | 1.2s |
+| + Shoelace | 30 → 0 | 72 → 0 | — | 6.91 | 4.2s |
+| + Injectivity | 30 → 0 | — | 48 → 0 | 7.56 | 1.5s |
+| All three | 30 → 0 | 72 → 0 | 48 → 0 | 7.56 | 3.8s |
+
+With all constraints active, every metric is satisfied simultaneously. The L2 error varies because each constraint configuration steers the optimizer to a different feasible region:
+
+![All constraints](docs/images/constraint_all.png)
 
 ## Convergence
 
@@ -372,7 +464,7 @@ When all constraints are active, the optimizer converges to the minimum-L2 field
 
 ## 3D Extension
 
-The 3D extension in `modules/dvfopt3d.py` generalizes all 2D operations:
+The 3D extension in `dvfopt/core/solver3d.py` + `dvfopt/core/iterative3d.py` generalizes all 2D operations:
 
 | Aspect | 2D | 3D |
 |--------|----|----|
@@ -397,22 +489,49 @@ The iterative algorithm is structurally identical — find worst voxel, compute 
 ## Project Structure
 
 ```
-├── modules/                        # Shared Python modules
-│   ├── dvfopt.py                   # Core 2D optimization (serial + parallel)
-│   ├── dvfopt3d.py                 # 3D extension
-│   ├── dvfviz.py                   # Visualization utilities
-│   ├── jacobian.py                 # SimpleITK Jacobian wrapper
-│   ├── laplacian.py                # Laplacian interpolation from correspondences
-│   ├── correspondences.py          # Point correspondence utilities
+├── dvfopt/                         # Installable Python package
+│   ├── core/                       # Optimization algorithms
+│   │   ├── objective.py            # L2 objective function
+│   │   ├── constraints.py          # Jacobian, shoelace, injectivity constraints
+│   │   ├── spatial.py              # Window selection, bounding box, edge logic
+│   │   ├── solver.py               # Single-window SLSQP solver
+│   │   ├── iterative.py            # Serial iterative correction (2D)
+│   │   ├── parallel.py             # Hybrid parallel correction (2D)
+│   │   ├── solver3d.py             # 3D solver helpers
+│   │   └── iterative3d.py          # 3D iterative correction
+│   ├── jacobian/                   # Jacobian determinant computation
+│   │   ├── numpy_jdet.py           # Pure-numpy 2D/3D Jacobian
+│   │   ├── sitk_jdet.py            # SimpleITK wrapper
+│   │   ├── shoelace.py             # Shoelace (geometric quad area) constraint
+│   │   └── monotonicity.py         # Injectivity/monotonicity constraint
+│   ├── dvf/                        # Deformation field utilities
+│   │   ├── generation.py           # Random DVF generation (2D/3D)
+│   │   └── scaling.py              # Bicubic rescaling (2D/3D)
+│   ├── laplacian/                  # Laplacian interpolation
+│   │   ├── matrix.py               # Sparse matrix construction
+│   │   └── solver.py               # LGMRES solver, end-to-end pipeline
+│   ├── viz/                        # Visualization (matplotlib)
+│   │   ├── snapshots.py            # Per-iteration heatmaps
+│   │   ├── fields.py               # Deformation field plots
+│   │   ├── grids.py                # Deformed grid visualization
+│   │   ├── closeups.py             # Checkerboard & neighborhood views
+│   │   └── pipeline.py             # End-to-end plotting pipeline
+│   ├── io/                         # I/O utilities
+│   │   └── nifti.py                # NIfTI loading via nibabel
+│   ├── utils/                      # Miscellaneous helpers
+│   │   ├── checkerboard.py         # Checkerboard image generation
+│   │   ├── correspondences.py      # Point correspondence utilities
+│   │   └── transform.py            # Affine/deformation field application
 │   └── testcases.py                # Test case registry and data loaders
 │
-├── slsqp-iterative-refactored.ipynb    # Iterative SLSQP — primary notebook
-├── heuristic-neg-jacobian.ipynb        # Heuristic (NMVF) correction
-├── slsqp-3d.ipynb                      # 3D correction tests
-├── run-parallel-corrections.ipynb      # Batch parallel corrections
-├── generate_test_cases.ipynb           # Generate and save test data
-├── test-shoelace-constraint.ipynb      # Shoelace constraint tests
-├── test-injectivity-constraint.ipynb   # Injectivity constraint tests
+├── notebooks/                      # Jupyter notebooks
+│   ├── slsqp-iterative-refactored.ipynb    # Iterative SLSQP — primary
+│   ├── heuristic-neg-jacobian.ipynb        # Heuristic (NMVF) correction
+│   ├── slsqp-3d.ipynb                      # 3D correction tests
+│   ├── run-parallel-corrections.ipynb      # Batch parallel corrections
+│   ├── generate_test_cases.ipynb           # Generate and save test data
+│   ├── test-shoelace-constraint.ipynb      # Shoelace constraint tests
+│   └── test-injectivity-constraint.ipynb   # Injectivity constraint tests
 │
 ├── benchmarks/                     # Benchmark notebooks
 │   ├── benchmark-serial-vs-parallel.ipynb
@@ -427,14 +546,15 @@ The iterative algorithm is structurally identical — find worst voxel, compute 
 
 ### Module Reference
 
-| Module | Purpose |
-|--------|---------|
-| `dvfopt.py` | Objective/constraint functions, `_numpy_jdet_2d`, `iterative_with_jacobians2` (serial), `iterative_parallel` (hybrid), `generate_random_dvf`, `scale_dvf`, `neg_jdet_bounding_window` |
-| `dvfopt3d.py` | 3D Jacobian (`_numpy_jdet_3d`), 26-connectivity windowing, 6-face boundary freezing, `iterative_3d` |
-| `dvfviz.py` | `plot_deformations` (2×2 panel), `plot_grid_before_after` (colored quad grids), `plot_step_snapshot` (per-iteration heatmap), `run_lapl_and_correction` (end-to-end pipeline) |
-| `laplacian.py` | Sparse Laplacian matrix with Dirichlet BCs, LGMRES solver for displacement interpolation from correspondences |
-| `testcases.py` | `SYNTHETIC_CASES` (8 correspondence-based), `RANDOM_DVF_CASES` (4 random), `REAL_DATA_SLICES` (8 real-data configs) |
-| `correspondences.py` | Duplicate removal, line intersection detection, correspondence swapping, downsampling |
+| Sub-package | Purpose |
+|-------------|---------|
+| `dvfopt.core` | Objective/constraint functions, `iterative_with_jacobians2` (serial), `iterative_parallel` (hybrid), `iterative_3d`, window selection, SLSQP solver |
+| `dvfopt.jacobian` | Pure-numpy 2D/3D Jacobian (`jacobian_det2D`, `jacobian_det3D`), SimpleITK wrapper, shoelace constraint, injectivity constraint |
+| `dvfopt.dvf` | `generate_random_dvf`, `scale_dvf` (2D/3D) |
+| `dvfopt.laplacian` | Sparse Laplacian matrix with Dirichlet BCs, LGMRES solver for displacement interpolation from correspondences |
+| `dvfopt.viz` | `plot_deformations` (2×2 panel), `plot_grid_before_after` (colored quad grids), `plot_step_snapshot` (per-iteration heatmap), `run_lapl_and_correction` (end-to-end pipeline) |
+| `dvfopt.testcases` | `SYNTHETIC_CASES` (8 correspondence-based), `RANDOM_DVF_CASES` (4 random), `REAL_DATA_SLICES` (8 real-data configs) |
+| `dvfopt.utils` | Checkerboard generation, point correspondence utilities, affine/deformation transforms |
 
 ## Test Cases
 
@@ -474,7 +594,7 @@ Upscaled cases (5×5 → larger) produce smooth spiral-like patterns via bicubic
 
 ### Real Data
 
-Axial slices from ANTs registration warps (`.npy` files), available at full resolution (320×456) and downscaled (64×91). Real data files are not included in the repository — see `modules/testcases.py` for the `REAL_DATA_SLICES` configuration.
+Axial slices from ANTs registration warps (`.npy` files), available at full resolution (320×456) and downscaled (64×91). Real data files are not included in the repository — see `dvfopt/testcases.py` for the `REAL_DATA_SLICES` configuration.
 
 ## Installation
 
@@ -484,6 +604,7 @@ source .venv/bin/activate  # Linux/Mac
 # or: .venv\Scripts\activate  # Windows
 
 pip install -r requirements.txt
+pip install -e .  # Install dvfopt package in editable mode
 ```
 
 ### Dependencies
@@ -495,7 +616,7 @@ pip install -r requirements.txt
 ### Iterative SLSQP (Recommended)
 
 ```python
-from modules.dvfopt import iterative_parallel, jacobian_det2D
+from dvfopt import iterative_parallel, jacobian_det2D
 
 # deformation: (3, 1, H, W) numpy array with channels [dz, dy, dx]
 phi_corrected = iterative_parallel(
@@ -522,7 +643,7 @@ phi_corrected = heuristic_negative_jacobian_correction(deformation, max_iter=100
 ### 3D Volumes
 
 ```python
-from modules.dvfopt3d import iterative_3d, jacobian_det3D
+from dvfopt import iterative_3d, jacobian_det3D
 
 # deformation: (3, D, H, W) numpy array
 phi_corrected = iterative_3d(deformation, method="SLSQP", verbose=1)

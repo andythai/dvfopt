@@ -1,6 +1,6 @@
 """Find crops from the real 3D deformation that have negative Jdet."""
 import numpy as np
-from modules.dvfopt3d import jacobian_det3D
+from dvfopt import jacobian_det3D
 
 d = np.load('data/corrected_correspondences_count_touching/registered_output/deformation3d.npy')
 print(f'Full volume: {d.shape}')

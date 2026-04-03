@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from dvfopt import iterative_3d; print\\('iterative_3d OK'\\)\")",
+      "Bash(python -c \"from dvfopt.core.spatial3d import argmin_worst_voxel, get_nearest_center_3d, neg_jdet_bounding_window_3d; print\\('spatial3d OK'\\)\")",
+      "Bash(python -c \"from dvfopt.core.constraints3d import jacobian_constraint_3d, _build_constraints_3d; print\\('constraints3d OK'\\)\")"
+    ]
+  }
+}

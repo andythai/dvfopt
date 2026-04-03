@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-Research codebase for correcting **negative Jacobian determinants** in 2D deformation (displacement) fields. Three correction methods are implemented in Jupyter notebooks, with shared utilities in `modules/`. Results are organized under `paper_outputs/` and `test/`.
+Research codebase for correcting **negative Jacobian determinants** in 2D and 3D deformation (displacement) fields. Three correction methods are implemented in Jupyter notebooks under `notebooks/`, with shared code in the installable `dvfopt/` package. Results are organized under `output/` and `data/`.
 
 ## Core Data Conventions
 
 - **Deformation fields:** `(3, 1, H, W)` numpy arrays — channels are `[dz, dy, dx]`. For 2D slice work, the z-slice dimension is 1. Convention is **pull-back** (backward mapping): for each point in the fixed image, the displacement vector points to where in the moving image that pixel's value comes from. I.e. `fixed_pos + displacement = moving_pos`.
 - **Points/coordinates:** Always `[z, y, x]` ordering. Correspondences are `(N, 3)` arrays.
-- **SimpleITK interop:** Displacement arrays are transposed `(3,1,H,W)` → `(1,H,W,3)` and axis-reordered `[2,1,0]` (zyx→xyz) before calling SimpleITK. See `modules/jacobian.py:sitk_jacobian_determinant()`.
-- **Jacobian computation (optimiser):** `dvfopt.py` uses a pure-numpy 2D Jacobian determinant (`_numpy_jdet_2d`) via `np.gradient` central differences. This matches SimpleITK for interior pixels and avoids the ~3 ms/call SimpleITK overhead that made SLSQP numerical gradients infeasible. `modules/jacobian.py` still provides the SimpleITK wrapper for other uses.
+- **SimpleITK interop:** Displacement arrays are transposed `(3,1,H,W)` → `(1,H,W,3)` and axis-reordered `[2,1,0]` (zyx→xyz) before calling SimpleITK. See `dvfopt/jacobian/sitk_jdet.py:sitk_jacobian_determinant()`.
+- **Jacobian computation (optimiser):** `dvfopt/jacobian/numpy_jdet.py` uses a pure-numpy 2D Jacobian determinant (`_numpy_jdet_2d`) via `np.gradient` central differences. This matches SimpleITK for interior pixels and avoids the ~3 ms/call SimpleITK overhead that made SLSQP numerical gradients infeasible.
 - **Jacobian threshold:** `0.01` (strictly positive, not ≥0). Error tolerance `1e-5`.
 - **Plotting:** Uses `indexing='xy'` for meshgrid; y-axis is inverted (`invert_yaxis()`) to match image convention.
 
@@ -17,9 +17,9 @@ Research codebase for correcting **negative Jacobian determinants** in 2D deform
 
 | Method | Notebook | Key Function | Tradeoff |
 |--------|----------|-------------|----------|
-| **Heuristic (NMVF)** | `heuristic-neg-jacobian.ipynb` | `heuristic_negative_jacobian_correction()` | Fastest, highest L2 error |
-| **Full SLSQP** | `slsqp-full-modified.ipynb` | `full_slsqp()` | Lowest L2 error, slowest (full grid optimization) |
-| **Iterative SLSQP** | `slsqp-iterative.ipynb` | `iterative_with_jacobians2()` | Near-optimal L2, faster (windowed sub-optimizations) |
+| **Heuristic (NMVF)** | `notebooks/heuristic-neg-jacobian.ipynb` | `heuristic_negative_jacobian_correction()` | Fastest, highest L2 error |
+| **Full SLSQP** | `legacy_code/slsqp-full-modified.ipynb` | `full_slsqp()` | Lowest L2 error, slowest (full grid optimization) |
+| **Iterative SLSQP** | `notebooks/slsqp-iterative-refactored.ipynb` | `iterative_with_jacobians2()` | Near-optimal L2, faster (windowed sub-optimizations) |
 
 All methods take a `(3, 1, H, W)` deformation, fix negative-Jdet regions, and return a corrected field.
 
@@ -30,21 +30,24 @@ All methods take a `(3, 1, H, W)` deformation, fix negative-Jdet regions, and re
 4. Runs `scipy.optimize.minimize(method='SLSQP')` on the submatrix with frozen edge constraints.
 5. Repeats for next-worst pixel. Tracks `window_counts` per size.
 
-## Shared Modules (`modules/`)
+## Package Structure (`dvfopt/`)
 
-- **`dvfopt.py`** — Core optimisation module containing both serial and hybrid-parallel iterative SLSQP algorithms. Key entry points: `iterative_with_jacobians2(deformation, method, ...)` (serial) and `iterative_parallel(deformation, method, ..., max_workers=None)` (hybrid parallel). Also exports `jacobian_det2D()`, objective/constraint helpers, windowed sub-optimisation utilities, `generate_random_dvf()`, `scale_dvf()`, and `neg_jdet_bounding_window()`. No matplotlib or pandas dependency.
-- **`dvfviz.py`** — All visualisation and convenience orchestration. `plot_deformations()`: 2×2 initial-vs-corrected panel. `plot_jacobians_iteratively()`: grid of Jacobian snapshots. `run_lapl_and_correction()`: end-to-end Laplacian → correction → plot pipeline (also calls `plot_grid_before_after`). `plot_step_snapshot()`: single-panel per-iteration heatmap (called lazily from `dvfopt` when `plot_every` is set). `plot_deformation_field()`: single-field Jacobian + quiver preview. `plot_2d_deformation_grid()`: deformed grid lines. `plot_deformed_quads()` / `plot_deformed_quads_colored()`: quad mesh visualisation colored by Jacobian determinant. `plot_grid_before_after()`: side-by-side initial-vs-corrected deformation grids coloured by Jacobian determinant, with yellow outlines on negative-Jdet cells.
-- **`testcases.py`** — Test case registry and data-loading utilities. `SYNTHETIC_CASES`: dict of 8 correspondence-based test cases. `RANDOM_DVF_CASES`: dict of 4 random DVF configs. `REAL_DATA_SLICES`: dict of 8 real-data slice configs. `make_deformation(case_key)`: builds a `(3,1,H,W)` deformation from correspondences via Laplacian. `make_random_dvf(case_key)`: generates a random DVF. `load_slice(slice_idx, ...)`: loads a real `.npy` slice with optional downscaling. `save_and_summarize(deformation, save_path)`: saves deformation + prints neg-Jdet summary.
-- **`checkerboard.py`** — Checkerboard image creation. `create_checkerboard()`: generates a binary checkerboard array.
-- **`jacobian.py`** — `sitk_jacobian_determinant(deformation)`: wraps SimpleITK Jacobian computation. `surrounding_points()`: debug utility.
-- **`laplacian.py`** — `laplacianA3D()`: builds sparse Laplacian matrix with Dirichlet BCs. `compute3DLaplacianFromShape()`: solves Laplacian system via LGMRES. `sliceToSlice3DLaplacian()`: end-to-end pipeline from NIfTI.
+- **`dvfopt.core`** — Optimization algorithms. `core/objective.py`: L2 objective. `core/constraints.py`: Jacobian/shoelace/injectivity constraints. `core/spatial.py`: window selection, bounding boxes, edge logic. `core/solver.py`: single-window SLSQP. `core/iterative.py`: `iterative_with_jacobians2()` (serial 2D). `core/parallel.py`: `iterative_parallel()` (hybrid parallel 2D). `core/solver3d.py` + `core/iterative3d.py`: 3D extension.
+- **`dvfopt.jacobian`** — Jacobian computation. `numpy_jdet.py`: pure-numpy 2D/3D via `np.gradient`. `sitk_jdet.py`: SimpleITK wrapper. `shoelace.py`: geometric quad-cell area constraint. `monotonicity.py`: injectivity/monotonicity constraint.
+- **`dvfopt.dvf`** — DVF utilities. `generation.py`: `generate_random_dvf()` (2D/3D). `scaling.py`: `scale_dvf()` bicubic rescaling (2D/3D).
+- **`dvfopt.laplacian`** — Laplacian interpolation. `matrix.py`: sparse Laplacian matrix with Dirichlet BCs. `solver.py`: LGMRES solver, `sliceToSlice3DLaplacian()` end-to-end pipeline.
+- **`dvfopt.viz`** — All visualization. `snapshots.py`: per-iteration heatmaps. `fields.py`: deformation field plots. `grids.py`: deformed quad-grid visualization colored by Jdet. `closeups.py`: checkerboard and neighborhood views. `pipeline.py`: `run_lapl_and_correction()` end-to-end pipeline.
+- **`dvfopt.io`** — I/O. `nifti.py`: NIfTI loading via nibabel.
+- **`dvfopt.utils`** — Helpers. `checkerboard.py`, `correspondences.py`, `transform.py`.
+- **`dvfopt.testcases`** — Test case registry. `SYNTHETIC_CASES`, `RANDOM_DVF_CASES`, `REAL_DATA_SLICES`, `make_deformation()`, `make_random_dvf()`, `load_slice()`, `save_and_summarize()`.
+- **`correspondences.py`** — `remove_duplicates()`, `do_lines_intersect()`, `swap_correspondences()`, `downsample_points()`: handle point correspondences and detect/resolve crossing displacement vectors.
 - **`correspondences.py`** — `remove_duplicates()`, `do_lines_intersect()`, `swap_correspondences()`, `downsample_points()`: handle point correspondences and detect/resolve crossing displacement vectors.
 
 ## Test Cases & Data
 
-- **Synthetic grids:** Defined in `modules/testcases.py` as `SYNTHETIC_CASES` dict mapping case keys to `(msample, fsample, grid_size)` tuples. Common sizes: 10×10, 20×20. Types: `crossing` (intersecting vectors), `opposites` (opposing vectors), `checkerboard`.
-- **Random DVFs:** Defined in `modules/testcases.py` as `RANDOM_DVF_CASES` dict. Generated via `generate_random_dvf(shape=(3,1,H,W), max_magnitude=5.0)` from `dvfopt.py`.
-- **Real data:** `.npy` files in `experiments/` (e.g., `02b_320x456_slice200.npy`). Configured in `REAL_DATA_SLICES` dict. Downscaled versions at 64×91 via `scale_dvf()`.
+- **Synthetic grids:** Defined in `dvfopt/testcases.py` as `SYNTHETIC_CASES` dict mapping case keys to `(msample, fsample, grid_size)` tuples. Common sizes: 10×10, 20×20. Types: `crossing` (intersecting vectors), `opposites` (opposing vectors), `checkerboard`.
+- **Random DVFs:** Defined in `dvfopt/testcases.py` as `RANDOM_DVF_CASES` dict. Generated via `generate_random_dvf(shape=(3,1,H,W), max_magnitude=5.0)` from `dvfopt.dvf`.
+- **Real data:** `.npy` files in `data/` (e.g., `02b_320x456_slice200.npy`). Configured in `REAL_DATA_SLICES` dict. Downscaled versions at 64×91 via `scale_dvf()`.
 
 ## Output Structure
 
@@ -62,7 +65,6 @@ Organized as `paper_outputs/experiments/{method}/{grid_size}/{test_case}/` and `
 
 ## Working With This Codebase
 
-- The `slsqp-iterative copy.ipynb` is a working copy of `slsqp-iterative.ipynb` — check for divergence before editing.
-- Notebooks in `archive/` are historical iterations; the root-level notebooks are canonical.
+- Notebooks in `archive/` are historical iterations; notebooks in `notebooks/` are canonical.
 - When modifying optimization functions (`objectiveEuc`, constraint functions), preserve the `phi` flattening convention: `phi[:len(phi)//2]` = dy, `phi[len(phi)//2:]` = dx.
-- Laplacian matrix construction in `modules/laplacian.py` uses `z*ny*nz + y*nz + x` flattening — be careful with axis ordering when modifying.
+- Laplacian matrix construction in `dvfopt/laplacian/matrix.py` uses `z*ny*nz + y*nz + x` flattening — be careful with axis ordering when modifying.
