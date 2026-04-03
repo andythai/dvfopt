@@ -16,6 +16,7 @@ from dvfopt.jacobian.shoelace import (
 )
 from dvfopt.jacobian.monotonicity import (
     _monotonicity_diffs_2d,
+    _diagonal_monotonicity_diffs_2d,
     injectivity_constraint,
 )
 

@@ -215,15 +215,18 @@ def shoelace_constraint_jacobian_2d(phi_flat, submatrix_size, exclude_boundaries
 def injectivity_constraint_jacobian_2d(phi_flat, submatrix_size, exclude_boundaries=True):
     """Sparse Jacobian of the injectivity (monotonicity) constraint.
 
-    h_mono[i,j] = 1 + dx[i,j+1] - dx[i,j]  →  ∂/∂dx[i,j] = -1, ∂/∂dx[i,j+1] = +1
-    v_mono[i,j] = 1 + dy[i+1,j] - dy[i,j]  →  ∂/∂dy[i,j] = -1, ∂/∂dy[i+1,j] = +1
+    h_mono[i,j] = 1 + dx[i,j+1] - dx[i,j]    →  ∂/∂dx[i,j]=-1,  ∂/∂dx[i,j+1]=+1
+    v_mono[i,j] = 1 + dy[i+1,j] - dy[i,j]    →  ∂/∂dy[i,j]=-1,  ∂/∂dy[i+1,j]=+1
+    d1[r,c]    = 1 + dx[r,c+1] - dx[r+1,c]   →  ∂/∂dx[r,c+1]=+1, ∂/∂dx[r+1,c]=-1
+    d2[r,c]    = 1 + dy[r+1,c] - dy[r,c+1]   →  ∂/∂dy[r+1,c]=+1, ∂/∂dy[r,c+1]=-1
 
-    This is constant (doesn't depend on phi_flat values) — 2 nonzeros per row.
+    All rows are constant (2 nonzeros each, independent of phi_flat values).
     """
     sy, sx = submatrix_size if isinstance(submatrix_size, tuple) else (submatrix_size, submatrix_size)
     pixels = sy * sx
 
     # h_mono shape: (sy, sx-1); v_mono shape: (sy-1, sx)
+    # d1, d2 shape: (sy-1, sx-1)
     if exclude_boundaries:
         h_i_range = range(1, sy - 1)
         h_j_range = range(1, sx - 2)
@@ -231,6 +234,9 @@ def injectivity_constraint_jacobian_2d(phi_flat, submatrix_size, exclude_boundar
         v_i_range = range(1, sy - 2)
         v_j_range = range(1, sx - 1)
         n_v = (sy - 3) * (sx - 2)
+        d_r_range = range(1, sy - 2)
+        d_c_range = range(1, sx - 2)
+        n_d = (sy - 3) * (sx - 3)
     else:
         h_i_range = range(sy)
         h_j_range = range(sx - 1)
@@ -238,8 +244,11 @@ def injectivity_constraint_jacobian_2d(phi_flat, submatrix_size, exclude_boundar
         v_i_range = range(sy - 1)
         v_j_range = range(sx)
         n_v = (sy - 1) * sx
+        d_r_range = range(sy - 1)
+        d_c_range = range(sx - 1)
+        n_d = (sy - 1) * (sx - 1)
 
-    n_rows = n_h + n_v
+    n_rows = n_h + n_v + 2 * n_d
     rows = []
     cols = []
     vals = []
@@ -257,6 +266,22 @@ def injectivity_constraint_jacobian_2d(phi_flat, submatrix_size, exclude_boundar
             rows.extend([row_idx, row_idx])
             cols.extend([pixels + i * sx + j, pixels + (i + 1) * sx + j])
             vals.extend([-1.0, 1.0])
+            row_idx += 1
+
+    # d1[r,c] = 1 + dx[r, c+1] - dx[r+1, c]
+    for r in d_r_range:
+        for c in d_c_range:
+            rows.extend([row_idx, row_idx])
+            cols.extend([r * sx + (c + 1), (r + 1) * sx + c])
+            vals.extend([1.0, -1.0])
+            row_idx += 1
+
+    # d2[r,c] = 1 + dy[r+1, c] - dy[r, c+1]
+    for r in d_r_range:
+        for c in d_c_range:
+            rows.extend([row_idx, row_idx])
+            cols.extend([pixels + (r + 1) * sx + c, pixels + r * sx + (c + 1)])
+            vals.extend([1.0, -1.0])
             row_idx += 1
 
     n_cols = 2 * pixels

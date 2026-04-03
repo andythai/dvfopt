@@ -13,6 +13,7 @@ from dvfopt.jacobian.shoelace import (
 )
 from dvfopt.jacobian.monotonicity import (
     _monotonicity_diffs_2d,
+    _diagonal_monotonicity_diffs_2d,
     injectivity_constraint,
 )
 from dvfopt.core.gradients import (
@@ -71,6 +72,7 @@ def _quality_map(phi, enforce_shoelace, enforce_injectivity=False,
         dy = phi[0]
         dx = phi[1]
         h_mono, v_mono = _monotonicity_diffs_2d(dy, dx)
+        d1, d2 = _diagonal_monotonicity_diffs_2d(dy, dx)
         mono = np.full((1, H, W), np.inf)
         # h_mono is (H, W-1): gap between col j and col j+1
         mono[0, :, :-1] = np.minimum(mono[0, :, :-1], h_mono)
@@ -78,6 +80,12 @@ def _quality_map(phi, enforce_shoelace, enforce_injectivity=False,
         # v_mono is (H-1, W): gap between row i and row i+1
         mono[0, :-1, :] = np.minimum(mono[0, :-1, :], v_mono)
         mono[0, 1:,  :] = np.minimum(mono[0, 1:,  :], v_mono)
+        # d1 is (H-1, W-1): involves (r, c+1) and (r+1, c)
+        mono[0, :-1, 1:] = np.minimum(mono[0, :-1, 1:], d1)
+        mono[0, 1:, :-1] = np.minimum(mono[0, 1:, :-1], d1)
+        # d2 is (H-1, W-1): involves (r+1, c) and (r, c+1)
+        mono[0, 1:, :-1] = np.minimum(mono[0, 1:, :-1], d2)
+        mono[0, :-1, 1:] = np.minimum(mono[0, :-1, 1:], d2)
         result = np.minimum(result, mono)
 
     return result
