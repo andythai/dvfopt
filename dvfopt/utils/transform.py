@@ -7,7 +7,7 @@ to images and point clouds.
 import numpy as np
 from scipy.ndimage import affine_transform, map_coordinates
 
-from dvfopt.io.nifti import loadNiiImages
+from dvfopt.io.nifti import load_nii_images
 
 
 def applyAffineTransform(image, A, output_shape):
@@ -19,7 +19,7 @@ def applyAffineTransform(image, A, output_shape):
     image : Can be Numpy array or a path to nii Image
     A : Affine matrix of 3x4
     """
-    data = loadNiiImages([image])
+    data = load_nii_images([image])
     transformedData = affine_transform(data, np.linalg.inv(A), output_shape=output_shape)
     return transformedData
 
@@ -37,7 +37,7 @@ def applyDeformationField(image, deformationField):
     deformationField : array-like
         Deformation field with shape (3, X, Y, Z).
     """
-    data = loadNiiImages([image])
+    data = load_nii_images([image])
     dx, dy, dz = deformationField[0], deformationField[1], deformationField[2]
 
     coords = np.mgrid[:data.shape[0], :data.shape[1], :data.shape[2]].astype(np.float64)

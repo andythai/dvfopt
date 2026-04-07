@@ -15,11 +15,19 @@ pip install -e .
 # Install with benchmark dependencies (itk-elastix, opencv, timm, torch, voxelmorph)
 pip install -e ".[benchmarks]"
 
-# Or install from requirements.txt (includes voxelmorph from GitHub)
-pip install -r requirements.txt
+# Or install all dev dependencies (includes voxelmorph from GitHub, pandas, ipykernel)
+pip install -r requirements-dev.txt
 ```
 
-There is no test suite, linter, or CI pipeline. Validation is done through Jupyter notebooks.
+Tests live in `tests/` and are run with `pytest`. There is no linter or CI pipeline. Additional validation is done through Jupyter notebooks.
+
+```bash
+# Run all tests
+pytest
+
+# Run a specific test module
+pytest tests/test_iterative.py
+```
 
 ## Architecture
 
@@ -40,7 +48,7 @@ There is no test suite, linter, or CI pipeline. Validation is done through Jupyt
 
 ### Constraint modes
 
-The solver accepts `enforce_shoelace=True` (geometric quad-cell area) and `enforce_injectivity=True` (coordinate monotonicity) flags in addition to the default Jacobian determinant constraint.
+The 2D solver accepts `enforce_shoelace=True` (geometric quad-cell area) and `enforce_injectivity=True` (coordinate monotonicity) flags in addition to the default Jacobian determinant constraint. The 3D solver (`iterative_3d`) does not yet support these extra constraint modes — only the Jacobian determinant constraint is available in 3D.
 
 ### Key entry points
 

@@ -17,7 +17,7 @@ Usage::
 import numpy as np
 
 import dvfopt.jacobian.sitk_jdet as _sitk
-from dvfopt.laplacian import sliceToSlice3DLaplacian
+from dvfopt.laplacian import slice_to_slice_3d_laplacian
 from dvfopt.dvf import generate_random_dvf, scale_dvf
 
 
@@ -184,7 +184,7 @@ def make_deformation(case_key):
     ms, fs = case["msample"], case["fsample"]
     H, W = case["resolution"]
     fixed_sample = np.zeros((1, H, W))
-    deformation, _, _, _, _ = sliceToSlice3DLaplacian(fixed_sample, ms, fs)
+    deformation, _, _, _, _ = slice_to_slice_3d_laplacian(fixed_sample, ms, fs)
     return deformation, ms, fs
 
 
@@ -236,7 +236,7 @@ def load_slice(slice_idx, scale_factor=1.0,
     scaled_f = np.round(fpoints * scale_factor).astype(int)
 
     fixed_sample = np.zeros((1, H_new, W_new))
-    deformation, _, _, _, _ = sliceToSlice3DLaplacian(fixed_sample, scaled_m, scaled_f)
+    deformation, _, _, _, _ = slice_to_slice_3d_laplacian(fixed_sample, scaled_m, scaled_f)
 
     return deformation, scaled_m, scaled_f
 

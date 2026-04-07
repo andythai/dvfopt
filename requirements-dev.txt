@@ -1,3 +1,8 @@
+# Development dependencies — includes everything from pyproject.toml plus
+# extras for notebooks (pandas, ipykernel) and benchmark registration methods.
+# For the minimal install use: pip install -e .
+# For benchmarks only:        pip install -e ".[benchmarks]"
+
 # Core scientific stack
 numpy
 scipy

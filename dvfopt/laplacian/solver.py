@@ -3,8 +3,8 @@
 import numpy as np
 from scipy.sparse.linalg import lgmres
 
-from dvfopt.io.nifti import loadNiiImages
-from dvfopt.laplacian.matrix import laplacianA3D
+from dvfopt.io.nifti import load_nii_images
+from dvfopt.laplacian.matrix import laplacian_a_3d
 
 
 def _prepare_correspondence_data(shape, mpoints, fpoints):
@@ -31,7 +31,7 @@ def _prepare_correspondence_data(shape, mpoints, fpoints):
     return Xd, Yd, Zd, boundary_indices
 
 
-def compute3DLaplacianFromShape(shape, mpoints, fpoints):
+def compute_3d_laplacian_from_shape(shape, mpoints, fpoints):
     """Solve the Laplacian system for a given shape and correspondences.
 
     Returns ``(phi_xy, A_, b_)`` where *phi_xy* is the concatenated
@@ -40,7 +40,7 @@ def compute3DLaplacianFromShape(shape, mpoints, fpoints):
     """
     Xd, Yd, Zd, boundary_indices = _prepare_correspondence_data(shape, mpoints, fpoints)
 
-    A = laplacianA3D(shape, boundary_indices)
+    A = laplacian_a_3d(shape, boundary_indices)
 
     A0 = np.zeros((A.shape[0], A.shape[1]))
     A_ = np.block([
@@ -53,12 +53,12 @@ def compute3DLaplacianFromShape(shape, mpoints, fpoints):
     return phi_xy, A_, b_
 
 
-def sliceToSlice3DLaplacian(fixedImage, mpoints, fpoints):
+def slice_to_slice_3d_laplacian(fixedImage, mpoints, fpoints):
     """End-to-end Laplacian interpolation from a NIfTI image and correspondences.
 
     Returns ``(deformationField, A, Xd, Yd, Zd)``.
     """
-    fdata = loadNiiImages([fixedImage])
+    fdata = load_nii_images([fixedImage])
 
     nx, ny, nz = fdata.shape
     nd = len(fdata.shape)
@@ -67,7 +67,7 @@ def sliceToSlice3DLaplacian(fixedImage, mpoints, fpoints):
 
     Xd, Yd, Zd, boundary_indices = _prepare_correspondence_data(fdata.shape, mpoints, fpoints)
 
-    A = laplacianA3D(fdata.shape, boundary_indices)
+    A = laplacian_a_3d(fdata.shape, boundary_indices)
 
     dx = lgmres(A, Xd, rtol=1e-2)[0]
     dy = lgmres(A, Yd, rtol=1e-2)[0]
@@ -80,7 +80,7 @@ def sliceToSlice3DLaplacian(fixedImage, mpoints, fpoints):
     return deformationField, A, Xd, Yd, Zd
 
 
-def createA(fixedImage, mpoints, fpoints, use_correspondences=True):
+def create_a(fixedImage, mpoints, fpoints, use_correspondences=True):
     """Build the Laplacian matrix *A* from an image array and correspondences.
 
     Parameters
@@ -90,5 +90,11 @@ def createA(fixedImage, mpoints, fpoints, use_correspondences=True):
     """
     _, _, _, boundary_indices = _prepare_correspondence_data(
         fixedImage.shape, mpoints, fpoints)
-    return laplacianA3D(fixedImage.shape, boundary_indices,
-                        use_correspondences=use_correspondences)
+    return laplacian_a_3d(fixedImage.shape, boundary_indices,
+                          use_correspondences=use_correspondences)
+
+
+# Backward-compatible aliases (prefer snake_case names).
+compute3DLaplacianFromShape = compute_3d_laplacian_from_shape
+sliceToSlice3DLaplacian = slice_to_slice_3d_laplacian
+createA = create_a

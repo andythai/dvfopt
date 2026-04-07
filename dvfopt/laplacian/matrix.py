@@ -24,7 +24,7 @@ def get_adjacent_indices(z: int, y: int, x: int, shape: tuple):
     return adjacent_indices
 
 
-def laplacianA3D(shape, boundaryIndices, use_correspondences=True):
+def laplacian_a_3d(shape, boundaryIndices, use_correspondences=True):
     """Build the sparse Laplacian matrix *A* for a 3D volume.
 
     Parameters
@@ -114,3 +114,7 @@ def laplacianA3D(shape, boundaryIndices, use_correspondences=True):
     gc.collect()
 
     return A
+
+
+# Backward-compatible alias (prefer ``laplacian_a_3d``).
+laplacianA3D = laplacian_a_3d

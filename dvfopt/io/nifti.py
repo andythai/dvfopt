@@ -5,7 +5,7 @@ import numpy as np
 import scipy.ndimage
 
 
-def loadNiiImages(imageList, scale=False):
+def load_nii_images(imageList, scale=False):
     """
     imageList can contain both paths to .nii images or loaded nii images.
     Loads nii images from the paths provided in imageList and returns a list
@@ -38,3 +38,7 @@ def loadNiiImages(imageList, scale=False):
     if len(imageList) == 1:
         return images[0]
     return images
+
+
+# Backward-compatible alias (prefer ``load_nii_images``).
+loadNiiImages = load_nii_images

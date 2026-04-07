@@ -60,13 +60,26 @@ from dvfopt.dvf import (
 
 # -- Laplacian interpolation -------------------------------------------------
 from dvfopt.laplacian import (
+    laplacian_a_3d,
     laplacianA3D,
+    compute_3d_laplacian_from_shape,
     compute3DLaplacianFromShape,
+    slice_to_slice_3d_laplacian,
     sliceToSlice3DLaplacian,
 )
 
 # -- I/O ---------------------------------------------------------------------
-from dvfopt.io import loadNiiImages
+from dvfopt.io import load_nii_images, loadNiiImages
+
+# -- Test cases --------------------------------------------------------------
+from dvfopt.testcases import (
+    SYNTHETIC_CASES,
+    RANDOM_DVF_CASES,
+    REAL_DATA_SLICES,
+    make_deformation,
+    make_random_dvf,
+    load_slice,
+)
 
 # -- Defaults ----------------------------------------------------------------
 from dvfopt._defaults import DEFAULT_PARAMS
