@@ -15,7 +15,6 @@ Performance optimizations:
 import gc
 import inspect
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
 
 from .utils import laplacianA3D, propagate_dirichlet_rhs
 
