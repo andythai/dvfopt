@@ -213,8 +213,8 @@ def laplacianA3D(shape, boundaryIndices, spacing=None, dtype=None, log_fn=None):
     I1 = (ids % stride_0) // stride_1
     I2 = ids % stride_1
 
-    _log = log_fn if log_fn is not None else (lambda msg, level='info': print(msg))
-    _log("Building data for Laplacian Sparse Matrix A (optimized)", 'info')
+    _log = log_fn if log_fn is not None else (lambda msg: print(msg))
+    _log("Building data for Laplacian Sparse Matrix A (optimized)")
 
     # Diagonal: sum of axis weights for present neighbours, set to 1 at
     # Dirichlet points
@@ -283,7 +283,7 @@ def laplacianA3D(shape, boundaryIndices, spacing=None, dtype=None, log_fn=None):
     del w_0m, w_0p, w_1m, w_1p, w_2m, w_2p
     gc.collect()
 
-    _log("Creating Laplacian Sparse Matrix A", 'info')
+    _log("Creating Laplacian Sparse Matrix A")
     A = scipy.sparse.csr_matrix((val, (row, col)), shape=(N, N))
 
     del row, col, val

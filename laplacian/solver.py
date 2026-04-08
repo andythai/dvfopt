@@ -60,13 +60,19 @@ def solveLaplacianFromCorrespondences(
         along axis *d* for every voxel.  Axis order matches *vol_shape*.
     """
     log = log_fn or (lambda msg: None)
+
+    n0, n1, n2 = vol_shape
+    nd = 3
+
+    if len(source_pts) == 0 or len(target_pts) == 0:
+        log("No correspondence points provided — returning zero deformation field.")
+        return np.zeros((nd, n0, n1, n2))
+
     from scipy.sparse import diags as sparse_diags
     from scipy.sparse.linalg import cg as sp_cg, lgmres as sp_lgmres
     _use_cg = solver_method.lower() != 'lgmres'
     _solver_label = 'CG+Jacobi' if _use_cg else 'LGMRES'
 
-    n0, n1, n2 = vol_shape
-    nd = 3
     flen = n0 * n1 * n2
 
     # Flat indices at template (target) locations
