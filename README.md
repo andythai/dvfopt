@@ -570,7 +570,8 @@ The iterative algorithm is structurally identical — find worst voxel, compute 
 │   │   ├── checkerboard.py         # Checkerboard image generation
 │   │   ├── correspondences.py      # Point correspondence utilities
 │   │   └── transform.py            # Affine/deformation field application
-│   └── test_cases.py                # Test case registry and data loaders
+│
+├── test_cases/                     # Test case registry and data loaders
 │
 ├── notebooks/                      # Jupyter notebooks
 │   ├── slsqp-iterative-refactored.ipynb    # Iterative SLSQP — primary
@@ -608,7 +609,7 @@ The iterative algorithm is structurally identical — find worst voxel, compute 
 
 ### Synthetic (Correspondence-Based)
 
-Defined in `test_cases.py` as `SYNTHETIC_CASES`. Deformation fields constructed by solving a Laplacian system with Dirichlet boundary conditions at correspondence points:
+Defined in the `test_cases/` package (for example, `test_cases/_cases.py`) as `SYNTHETIC_CASES`. Deformation fields constructed by solving a Laplacian system with Dirichlet boundary conditions at correspondence points:
 
 $$\nabla^2 u = 0 \quad \text{(interior)}, \qquad u(\mathbf{p}_i) = \mathbf{m}_i - \mathbf{f}_i \quad \text{(correspondences)}$$
 
