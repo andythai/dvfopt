@@ -184,7 +184,8 @@ def _invert_displacement(dy, dx, iterations=50):
 # ---------------------------------------------------------------------------
 def plot_grid_before_after(deformation_i, phi_corrected, figsize=(14, 6),
                            title="", spacing=1, linewidth=0.5,
-                           inverse=False, jdet_vmax=None):
+                           inverse=False, jdet_vmax=None,
+                           jac_init_override=None, jac_corr_override=None):
     """Side-by-side deformation grids coloured by Jacobian determinant.
 
     Parameters
@@ -202,6 +203,14 @@ def plot_grid_before_after(deformation_i, phi_corrected, figsize=(14, 6),
     jdet_vmax : float or None
         If set, caps the colormap range to ``[-jdet_vmax, jdet_vmax]``.
         Useful when extreme outliers wash out the colour scale.
+    jac_init_override, jac_corr_override : ndarray, shape ``(H, W)``, optional
+        Pre-computed Jacobian determinant maps to use for colouring instead
+        of recomputing from ``phi``. Essential when visualising a z-slice
+        of a 3D field: the 2D Jdet of the in-plane (dy, dx) stack does
+        **not** match the 3D Jdet the solver enforces, and can be negative
+        even when the 3D field is valid. Pass the relevant slice of the
+        full 3D Jdet here to get a faithful overlay. Ignored when
+        ``inverse=True``.
     """
     _, _, H, W = deformation_i.shape
 
@@ -239,8 +248,14 @@ def plot_grid_before_after(deformation_i, phi_corrected, figsize=(14, 6),
     else:
         phi_init_view = phi_init
         phi_corr_view = phi_corrected
-        jac_init = np.squeeze(jacobian_det2D(phi_init))
-        jac_corr = np.squeeze(jacobian_det2D(phi_corrected))
+        if jac_init_override is not None:
+            jac_init = np.asarray(jac_init_override)
+        else:
+            jac_init = np.squeeze(jacobian_det2D(phi_init))
+        if jac_corr_override is not None:
+            jac_corr = np.asarray(jac_corr_override)
+        else:
+            jac_corr = np.squeeze(jacobian_det2D(phi_corrected))
 
     # Shared colour normalisation across both panels
     J_all = np.concatenate([jac_init.ravel(), jac_corr.ravel()])

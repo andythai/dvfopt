@@ -108,9 +108,16 @@ def _optimize_patch(phi, phi_init, z0, z1, y0, y1, x0, x1, grid_shape,
     frozen_mask = _patch_frozen_mask(z0, z1, y0, y1, x0, x1, grid_shape)
     bounds = _patch_bounds(phi_flat, frozen_mask)
 
+    # The rim's Jdet uses one-sided differences that do not match the global
+    # central-difference Jdet, so penalising it drives L-BFGS-B to chase a
+    # phantom residual and introduces artefacts outside the patch. Restrict
+    # the penalty/barrier sum to interior (non-frozen) voxels — their Jdet
+    # agrees with the global field by construction.
+    active_mask = (~frozen_mask).ravel()
+
     target = threshold + margin
     j0 = jdet_full(phi_flat, patch_size)
-    feasible = float(j0.min()) >= target
+    feasible = float(j0[active_mask].min()) >= target
 
     t_start = time.time()
     lam_steps = 0
@@ -123,7 +130,7 @@ def _optimize_patch(phi, phi_init, z0, z1, y0, y1, x0, x1, grid_shape,
         res = minimize(
             penalty_objective_3d,
             phi_flat,
-            args=(phi_anchor, patch_size, threshold, margin, lam),
+            args=(phi_anchor, patch_size, threshold, margin, lam, active_mask),
             jac=True,
             method="L-BFGS-B",
             bounds=bounds,
@@ -133,7 +140,7 @@ def _optimize_patch(phi, phi_init, z0, z1, y0, y1, x0, x1, grid_shape,
         phi_flat = res.x
         lam_steps += 1
         j = jdet_full(phi_flat, patch_size)
-        if float(j.min()) >= target:
+        if float(j[active_mask].min()) >= target:
             feasible = True
             break
 
@@ -143,7 +150,7 @@ def _optimize_patch(phi, phi_init, z0, z1, y0, y1, x0, x1, grid_shape,
             res = minimize(
                 barrier_objective_3d,
                 phi_flat,
-                args=(phi_anchor, patch_size, threshold, mu),
+                args=(phi_anchor, patch_size, threshold, mu, active_mask),
                 jac=True,
                 method="L-BFGS-B",
                 bounds=bounds,
@@ -158,7 +165,7 @@ def _optimize_patch(phi, phi_init, z0, z1, y0, y1, x0, x1, grid_shape,
     phi[:, z0:z1 + 1, y0:y1 + 1, x0:x1 + 1] = phi_patch
 
     j_final = jdet_full(phi_flat, patch_size)
-    return time.time() - t_start, lam_steps, mu_steps, float(j_final.min())
+    return time.time() - t_start, lam_steps, mu_steps, float(j_final[active_mask].min())
 
 
 def _iterative_3d_barrier_windowed(
