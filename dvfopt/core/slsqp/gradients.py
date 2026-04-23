@@ -212,6 +212,87 @@ def shoelace_constraint_jacobian_2d(phi_flat, submatrix_size, exclude_boundaries
         (vals, (rows, cols)), shape=(n_rows, n_cols))
 
 
+def triangle_constraint_jacobian_2d(phi_flat, submatrix_size, exclude_boundaries=True):
+    """Sparse Jacobian of the 4-triangle-per-cell constraint.
+
+    For a triangle with vertices A, B, C in order, the signed area is
+    ``0.5 * ((x_B - x_A)(y_C - y_A) - (x_C - x_A)(y_B - y_A))`` which has
+    6 closed-form partials (one per vertex coordinate):
+
+        ∂a/∂x_A = 0.5 * (y_B - y_C)
+        ∂a/∂x_B = 0.5 * (y_C - y_A)
+        ∂a/∂x_C = 0.5 * (y_A - y_B)
+        ∂a/∂y_A = 0.5 * (x_C - x_B)
+        ∂a/∂y_B = 0.5 * (x_A - x_C)
+        ∂a/∂y_C = 0.5 * (x_B - x_A)
+
+    Row layout matches :func:`triangle_constraint`: T1 block, then T2, T3, T4.
+    Each row has 6 nonzeros (3 vertices × {dx, dy}).
+    """
+    sy, sx = submatrix_size if isinstance(submatrix_size, tuple) else (submatrix_size, submatrix_size)
+    pixels = sy * sx
+
+    dx = phi_flat[:pixels].reshape(sy, sx)
+    dy = phi_flat[pixels:].reshape(sy, sx)
+
+    ref_y, ref_x = np.mgrid[:sy, :sx]
+    X = ref_x + dx
+    Y = ref_y + dy
+
+    if exclude_boundaries:
+        r_range = range(1, sy - 2)
+        c_range_fn = lambda r: range(1, sx - 2)
+        n_cells = (sy - 3) * (sx - 3)
+    else:
+        r_range = range(sy - 1)
+        c_range_fn = lambda r: range(sx - 1)
+        n_cells = (sy - 1) * (sx - 1)
+
+    rows = []
+    cols = []
+    vals = []
+
+    # Each triangle has vertices (A, B, C).  We'll emit 4 rows per cell
+    # (one per triangle) across 4 triangle-blocks.  Triangle k's rows all
+    # come before triangle k+1's rows, matching ``triangle_constraint``.
+    def emit(row_idx, A_ij, B_ij, C_ij):
+        # A_ij, B_ij, C_ij are (row, col) tuples into the (sy, sx) grid
+        xa, ya = X[A_ij], Y[A_ij]
+        xb, yb = X[B_ij], Y[B_ij]
+        xc, yc = X[C_ij], Y[C_ij]
+        def lin(ij):
+            return ij[0] * sx + ij[1]
+        # dx partials
+        rows.extend([row_idx] * 3)
+        cols.extend([lin(A_ij), lin(B_ij), lin(C_ij)])
+        vals.extend([0.5 * (yb - yc), 0.5 * (yc - ya), 0.5 * (ya - yb)])
+        # dy partials
+        rows.extend([row_idx] * 3)
+        cols.extend([pixels + lin(A_ij), pixels + lin(B_ij), pixels + lin(C_ij)])
+        vals.extend([0.5 * (xc - xb), 0.5 * (xa - xc), 0.5 * (xb - xa)])
+
+    # Build triangle-by-triangle to keep row order consistent with the constraint
+    triangles = [
+        lambda r, c: ((r, c),     (r, c + 1),     (r + 1, c + 1)),  # T1 = (TL, TR, BR)
+        lambda r, c: ((r, c),     (r + 1, c + 1), (r + 1, c)),      # T2 = (TL, BR, BL)
+        lambda r, c: ((r, c),     (r, c + 1),     (r + 1, c)),      # T3 = (TL, TR, BL)
+        lambda r, c: ((r, c + 1), (r + 1, c + 1), (r + 1, c)),      # T4 = (TR, BR, BL)
+    ]
+
+    row_idx = 0
+    for tri_fn in triangles:
+        for r in r_range:
+            for c in c_range_fn(r):
+                A_ij, B_ij, C_ij = tri_fn(r, c)
+                emit(row_idx, A_ij, B_ij, C_ij)
+                row_idx += 1
+
+    n_rows = 4 * n_cells
+    n_cols = 2 * pixels
+    return scipy.sparse.csr_matrix(
+        (vals, (rows, cols)), shape=(n_rows, n_cols))
+
+
 def injectivity_constraint_jacobian_2d(phi_flat, submatrix_size, exclude_boundaries=True):
     """Sparse Jacobian of the injectivity (monotonicity) constraint.
 

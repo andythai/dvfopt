@@ -35,6 +35,7 @@ def iterative_serial(
     enforce_shoelace=False,
     enforce_injectivity=False,
     injectivity_threshold=None,
+    enforce_triangles=False,
     max_doublings=5,
     debug=None,
 ):
@@ -78,6 +79,12 @@ def iterative_serial(
         forces greater vertex separation in deformed space, preventing
         distant cells from overlapping under large shear.  Recommended
         range: ``0.05`` – ``0.3`` when ``enforce_injectivity=True``.
+    enforce_triangles : bool
+        When ``True``, adds a constraint requiring all 4 signed triangle
+        areas per cell (both diagonal splits) to exceed *threshold* — the
+        strict PL-bijectivity condition.  Stricter than ``enforce_shoelace``
+        (which checks the sum along one diagonal) at the cost of 4x
+        constraint rows per cell.
     max_doublings : int
         Maximum number of tau doublings in the adaptive injectivity loop
         (only used when ``enforce_injectivity=True`` and
@@ -124,6 +131,7 @@ def iterative_serial(
             max_minimize_iter=max_minimize_iter,
             enforce_shoelace=enforce_shoelace,
             enforce_injectivity=enforce_injectivity,
+            enforce_triangles=enforce_triangles,
             debug=debug,
         )
 
@@ -141,7 +149,8 @@ def iterative_serial(
     # Initial Jacobian
     jacobian_matrix, quality_matrix, init_neg, init_min = _update_metrics(
         phi, phi_init, enforce_shoelace, enforce_injectivity,
-        num_neg_jac, min_jdet_list)
+        num_neg_jac, min_jdet_list,
+        enforce_triangles=enforce_triangles)
 
     _log(verbose, 1, f"[init] Neg-Jdet pixels: {init_neg}  |  min Jdet: {init_min:.6f}")
 
@@ -211,6 +220,7 @@ def iterative_serial(
                 enforce_shoelace=enforce_shoelace,
                 enforce_injectivity=enforce_injectivity,
                 injectivity_threshold=injectivity_threshold,
+                enforce_triangles=enforce_triangles,
                 plot_callback=_cb,
                 deformation_i=deformation_i,
                 min_window=global_min_window,

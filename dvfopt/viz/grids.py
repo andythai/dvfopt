@@ -180,6 +180,137 @@ def _invert_displacement(dy, dx, iterations=50):
 
 
 # ---------------------------------------------------------------------------
+# Single deformation grid (Jdet-coloured)
+# ---------------------------------------------------------------------------
+def plot_grid(deformation, title="", figsize=(7, 6), spacing=1,
+              linewidth=0.5, inverse=False, jdet_vmax=None,
+              jac_override=None, ax=None):
+    """Plot a single deformation grid coloured by Jacobian determinant.
+
+    Single-panel counterpart to :func:`plot_grid_before_after` — same
+    rendering (yellow outlines on negative-Jdet cells, wireframe overlay),
+    no comparison.
+
+    Parameters
+    ----------
+    deformation : ndarray, shape ``(3, 1, H, W)``
+    title : str
+    figsize : tuple
+    spacing : int
+    linewidth : float
+    inverse : bool
+        If False (default), show the pull-back displacement field.
+        If True, show the push-forward (inverse) field via fixed-point
+        iteration.
+    jdet_vmax : float or None
+        If set, caps the colormap range to ``[-jdet_vmax, jdet_vmax]``.
+    jac_override : ndarray, shape ``(H, W)``, optional
+        Pre-computed Jacobian determinant map to use for colouring instead
+        of recomputing from the deformation. Useful when visualising a
+        z-slice of a 3D field (pass the relevant slice of the full 3D
+        Jdet). Ignored when ``inverse=True``.
+    ax : matplotlib Axes, optional
+        If given, draw into this axes instead of creating a new figure.
+    """
+    _, _, H, W = deformation.shape
+    phi_init = np.stack([deformation[1, 0], deformation[2, 0]])  # [dy, dx]
+
+    if inverse:
+        inv_dy, inv_dx = _invert_displacement(phi_init[0], phi_init[1])
+        phi_view = np.stack([inv_dy, inv_dx])
+
+        jac_fwd = np.squeeze(jacobian_det2D(phi_init))
+        yy, xx = np.mgrid[0:H, 0:W].astype(float)
+        preimg_y = np.clip(yy + inv_dy, 0, H - 1)
+        preimg_x = np.clip(xx + inv_dx, 0, W - 1)
+        jac_fwd_at_preimg = map_coordinates(
+            jac_fwd, [preimg_y, preimg_x], order=1, mode='nearest')
+        with np.errstate(divide='ignore', invalid='ignore'):
+            jac = np.where(np.abs(jac_fwd_at_preimg) > 1e-10,
+                           1.0 / jac_fwd_at_preimg, 0.0)
+    else:
+        phi_view = phi_init
+        if jac_override is not None:
+            jac = np.asarray(jac_override)
+        else:
+            jac = np.squeeze(jacobian_det2D(phi_init))
+
+    vmin = min(float(jac.min()), -0.5)
+    vmax = max(float(jac.max()), 1.5)
+    if jdet_vmax is not None:
+        vmin = max(vmin, -jdet_vmax)
+        vmax = min(vmax, jdet_vmax)
+    norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+    cmap = plt.get_cmap("bwr")
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
+        standalone = True
+    else:
+        fig = ax.figure
+        standalone = False
+
+    direction = "push-forward" if inverse else "pull-back"
+    neg = int((jac <= 0).sum())
+    label = f"{direction} field (neg Jdet = {neg})"
+
+    dy = phi_view[0]
+    dx = phi_view[1]
+    yy, xx = np.mgrid[0:H, 0:W].astype(float)
+    def_x = xx + dx
+    def_y = yy + dy
+
+    for i in range(0, H - spacing, spacing):
+        for j in range(0, W - spacing, spacing):
+            ci = [i, i, i + spacing, i + spacing]
+            cj = [j, j + spacing, j + spacing, j]
+            corners = [(def_x[np.clip(r, 0, H-1), np.clip(c, 0, W-1)],
+                        def_y[np.clip(r, 0, H-1), np.clip(c, 0, W-1)])
+                       for r, c in zip(ci, cj)]
+            jval = jac[i, j]
+            if jval <= 0:
+                fc = cmap(norm(jval))
+                poly = Polygon(corners, closed=True,
+                               facecolor=fc, edgecolor="yellow",
+                               linewidth=max(linewidth * 3, 1.5),
+                               zorder=2)
+            else:
+                fc = cmap(norm(jval))
+                poly = Polygon(corners, closed=True,
+                               facecolor=(*fc[:3], 0.25),
+                               edgecolor="none", zorder=0)
+            ax.add_patch(poly)
+
+    row_indices = list(range(0, H, spacing))
+    if (H - 1) not in row_indices:
+        row_indices.append(H - 1)
+    col_indices = list(range(0, W, spacing))
+    if (W - 1) not in col_indices:
+        col_indices.append(W - 1)
+
+    for i in row_indices:
+        ax.plot(def_x[i, col_indices], def_y[i, col_indices], 'k-',
+                linewidth=linewidth, zorder=1)
+    for j in col_indices:
+        ax.plot(def_x[row_indices, j], def_y[row_indices, j], 'k-',
+                linewidth=linewidth, zorder=1)
+
+    pad = max(W, H) * 0.03
+    ax.set_xlim(def_x.min() - pad, def_x.max() + pad)
+    ax.set_ylim(def_y.max() + pad, def_y.min() - pad)
+    ax.set_aspect("equal")
+    ax.set_title(label, fontsize=11)
+
+    if standalone:
+        sm = ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label="Jacobian determinant", shrink=0.85)
+        if title:
+            fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
+        plt.show()
+
+
+# ---------------------------------------------------------------------------
 # Before / after deformation grid comparison
 # ---------------------------------------------------------------------------
 def plot_grid_before_after(deformation_i, phi_corrected, figsize=(14, 6),

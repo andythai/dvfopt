@@ -32,8 +32,11 @@ MODES = {
 }
 
 
+ITER_CAPS = dict(max_iterations=300, max_minimize_iter=200)
+
+
 def _run_mode(dvf, **kwargs):
-    phi_corr = np.asarray(iterative_serial(dvf.copy(), verbose=0, **kwargs))
+    phi_corr = np.asarray(iterative_serial(dvf.copy(), verbose=0, **ITER_CAPS, **kwargs))
     if phi_corr.ndim == 4:
         phi_corr = np.stack([phi_corr[1, 0], phi_corr[2, 0]])
     jac_c  = np.squeeze(jacobian_det2D(phi_corr))
@@ -51,8 +54,15 @@ mode_stats = {name: {"pix": 0, "cell": 0, "sub": 0, "cases_pix_clean": 0,
               for name in MODES}
 mode_stats["initial"] = {"pix": 0, "cell": 0, "sub": 0}
 
+# Restrict the multi-mode sweep to small grids: injectivity-constrained
+# SLSQP adds O(N) constraints and becomes impractically slow on 20x20+.
+MAX_PIXELS_FOR_MULTI_MODE = 200  # i.e. up to ~14x14
+
 for rec in all_records:
     if int((rec["jac"] <= 0).sum()) == 0:
+        continue
+    if rec["jac"].size > MAX_PIXELS_FOR_MULTI_MODE:
+        print(f"[skip large] {rec['label']} ({rec['jac'].shape})")
         continue
     label = rec["label"]
     mode_stats["initial"]["pix"]  += int((rec["jac"] <= 0).sum())

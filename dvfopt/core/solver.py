@@ -9,7 +9,7 @@ from scipy.optimize import minimize, NonlinearConstraint
 
 from dvfopt._defaults import _log, _unpack_size, _adaptive_maxiter
 from dvfopt.jacobian.numpy_jdet import _numpy_jdet_2d, jacobian_det2D
-from dvfopt.jacobian.shoelace import _shoelace_areas_2d
+from dvfopt.jacobian.shoelace import _shoelace_areas_2d, _all_triangle_areas_2d
 from dvfopt.jacobian.monotonicity import injectivity_constraint
 from dvfopt.core.objective import objective_euc
 from dvfopt.core.slsqp.constraints import (
@@ -74,7 +74,8 @@ def _init_phi(deformation_i):
 
 def _update_metrics(phi, phi_init, enforce_shoelace, enforce_injectivity,
                     num_neg_jac, min_jdet_list, error_list=None,
-                    jacobian_matrix=None, patch_center=None, patch_size=None):
+                    jacobian_matrix=None, patch_center=None, patch_size=None,
+                    enforce_triangles=False):
     """Recompute Jacobian/quality matrices and append to accumulator lists.
 
     Parameters
@@ -101,8 +102,10 @@ def _update_metrics(phi, phi_init, enforce_shoelace, enforce_injectivity,
         jac = jacobian_matrix
     else:
         jac = jacobian_det2D(phi)
-    use_q = enforce_shoelace or enforce_injectivity
-    qm = _quality_map(phi, enforce_shoelace, enforce_injectivity, jacobian_matrix=jac) if use_q else jac
+    use_q = enforce_shoelace or enforce_injectivity or enforce_triangles
+    qm = _quality_map(phi, enforce_shoelace, enforce_injectivity,
+                      enforce_triangles=enforce_triangles,
+                      jacobian_matrix=jac) if use_q else jac
     cur_neg = int((jac <= 0).sum())
     cur_min = float(jac.min())
     num_neg_jac.append(cur_neg)
@@ -217,7 +220,7 @@ def _save_results(save_path, *, method, threshold, err_tol, max_iterations,
 # ---------------------------------------------------------------------------
 def _full_grid_step(phi, phi_init, H, W, threshold, max_minimize_iter,
                     method_name, verbose, enforce_shoelace, enforce_injectivity,
-                    injectivity_threshold=None):
+                    injectivity_threshold=None, enforce_triangles=False):
     """Optimize the entire H×W grid at once.
 
     Used as a fallback when the square sub-window (capped at
@@ -243,6 +246,14 @@ def _full_grid_step(phi, phi_init, H, W, threshold, max_minimize_iter,
             dy = phi_xy[pixels:].reshape(H, W)
             return _shoelace_areas_2d(dy, dx).flatten()
         constraints.append(NonlinearConstraint(shoe_con, threshold, np.inf))
+
+    if enforce_triangles:
+        def tri_con(phi_xy):
+            dx = phi_xy[:pixels].reshape(H, W)
+            dy = phi_xy[pixels:].reshape(H, W)
+            A = _all_triangle_areas_2d(dy, dx)
+            return A.reshape(A.shape[0], -1).ravel()
+        constraints.append(NonlinearConstraint(tri_con, threshold, np.inf))
 
     if enforce_injectivity:
         constraints.append(NonlinearConstraint(
@@ -282,6 +293,7 @@ def _optimize_single_window(
     enforce_shoelace=False,
     enforce_injectivity=False,
     injectivity_threshold=None,
+    enforce_triangles=False,
 ):
     """Run SLSQP on one sub-window.  Returns ``(result_x, elapsed, success)``."""
 
@@ -290,6 +302,7 @@ def _optimize_single_window(
         enforce_shoelace=enforce_shoelace,
         enforce_injectivity=enforce_injectivity,
         injectivity_threshold=injectivity_threshold,
+        enforce_triangles=enforce_triangles,
     )
 
     t0 = time.time()
@@ -356,6 +369,7 @@ def _serial_fix_pixel(
     enforce_shoelace=False,
     enforce_injectivity=False,
     injectivity_threshold=None,
+    enforce_triangles=False,
     plot_callback=None,
     deformation_i=None,
     min_window=(3, 3),
@@ -373,8 +387,10 @@ def _serial_fix_pixel(
     -------
     jacobian_matrix, quality_matrix, submatrix_size, per_index_iter, (cy, cx)
     """
-    _use_quality = enforce_shoelace or enforce_injectivity
-    quality_matrix = _quality_map(phi, enforce_shoelace, enforce_injectivity, jacobian_matrix=jacobian_matrix) if _use_quality else jacobian_matrix
+    _use_quality = enforce_shoelace or enforce_injectivity or enforce_triangles
+    quality_matrix = _quality_map(phi, enforce_shoelace, enforce_injectivity,
+                                  enforce_triangles=enforce_triangles,
+                                  jacobian_matrix=jacobian_matrix) if _use_quality else jacobian_matrix
 
     # Adaptive starting size from negative-Jdet bounding box
     submatrix_size, bbox_center = neg_jdet_bounding_window(
@@ -469,6 +485,7 @@ def _serial_fix_pixel(
             enforce_shoelace=enforce_shoelace,
             enforce_injectivity=enforce_injectivity,
             injectivity_threshold=injectivity_threshold,
+            enforce_triangles=enforce_triangles,
         )
         iter_times.append(elapsed)
         if not opt_success:
@@ -483,7 +500,8 @@ def _serial_fix_pixel(
             phi, phi_init, enforce_shoelace, enforce_injectivity,
             num_neg_jac, min_jdet_list, error_list,
             jacobian_matrix=jacobian_matrix, patch_center=(cy, cx),
-            patch_size=submatrix_size)
+            patch_size=submatrix_size,
+            enforce_triangles=enforce_triangles)
 
         _log(verbose, 2, f"  [sub-Jdet] centre ({cy},{cx}) window {sy}x{sx}:\n"
              + np.array2string(

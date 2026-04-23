@@ -13,6 +13,12 @@ from dvfopt.jacobian.shoelace import (
     _shoelace_areas_2d,
     shoelace_det2D,
     shoelace_constraint,
+    _triangulated_shoelace_areas_2d,
+    triangulated_shoelace_det2D,
+    triangulated_shoelace_constraint,
+    _all_triangle_areas_2d,
+    triangle_det2D,
+    triangle_constraint,
 )
 from dvfopt.jacobian.monotonicity import (
     _monotonicity_diffs_2d,
@@ -32,6 +38,10 @@ __all__ = [
     "sitk_jacobian_determinant",
     "shoelace_det2D",
     "shoelace_constraint",
+    "triangulated_shoelace_det2D",
+    "triangulated_shoelace_constraint",
+    "triangle_det2D",
+    "triangle_constraint",
     "injectivity_constraint",
     "has_quad_self_intersections",
     "ift_radius_2d",

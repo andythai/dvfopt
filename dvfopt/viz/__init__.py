@@ -23,6 +23,7 @@ from dvfopt.viz.grids import (
     plot_2d_deformation_grid,
     plot_deformed_quads,
     plot_deformed_quads_colored,
+    plot_grid,
     plot_grid_before_after,
 )
 from dvfopt.viz.closeups import (
@@ -52,6 +53,7 @@ __all__ = [
     "plot_2d_deformation_grid",
     "plot_deformed_quads",
     "plot_deformed_quads_colored",
+    "plot_grid",
     "plot_grid_before_after",
     "plot_checkerboard_before_after",
     "plot_neg_jdet_neighborhoods",
