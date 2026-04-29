@@ -20,6 +20,14 @@ from dvfopt.jacobian.shoelace import (
     triangle_det2D,
     triangle_constraint,
 )
+from dvfopt.jacobian.triangle_sign import (
+    _triangle_areas_2d,
+    _triangle_signs_2d,
+    triangle_sign_det2D,
+    triangle_sign_count_negatives,
+    triangle_sign_areas2D,
+    triangle_sign_constraint,
+)
 from dvfopt.jacobian.monotonicity import (
     _monotonicity_diffs_2d,
     _diagonal_monotonicity_diffs_2d,
@@ -42,6 +50,10 @@ __all__ = [
     "triangulated_shoelace_constraint",
     "triangle_det2D",
     "triangle_constraint",
+    "triangle_sign_det2D",
+    "triangle_sign_count_negatives",
+    "triangle_sign_areas2D",
+    "triangle_sign_constraint",
     "injectivity_constraint",
     "has_quad_self_intersections",
     "ift_radius_2d",

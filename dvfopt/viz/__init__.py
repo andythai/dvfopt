@@ -38,6 +38,11 @@ from dvfopt.viz.fields3d import (
     plot_deformation_grid_3d,
     plot_grid_before_after_3d,
 )
+from dvfopt.viz.triangle_debug import (
+    plot_triangle_debug,
+    plot_problematic_triangles,
+    find_problematic_pixels,
+)
 
 __all__ = [
     "CMAP",
@@ -63,4 +68,7 @@ __all__ = [
     "plot_neg_voxels_before_after",
     "plot_deformation_grid_3d",
     "plot_grid_before_after_3d",
+    "plot_triangle_debug",
+    "plot_problematic_triangles",
+    "find_problematic_pixels",
 ]

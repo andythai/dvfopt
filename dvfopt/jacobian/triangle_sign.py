@@ -1,0 +1,151 @@
+"""Per-pixel two-triangle sign-only Jacobian check (2D).
+
+Geometric alternative to central-difference Jacobians: for every interior
+pixel (x, y) form two triangles in the warped grid and check only their
+signed-area sign (negative = flip, 0 = collapse, positive = valid).
+
+Triangle vertices (image coords, origin top-left, +x right, +y down):
+    T1 at (x, y):  (x, y), (x-1, y+1), (x, y+1)
+    T2 at (x, y):  (x, y), (x,   y+1), (x+1, y)
+
+With +y pointing down the raw 2D cross product is negated w.r.t. a
+math-origin convention, so we negate to keep "positive = valid".
+
+The output is indexed by cell (y, x) under a TR-BL triangulation so the
+shape ``(2, H-1, W-1)`` mirrors ``triangulated_shoelace_det2D`` (which uses
+the TL-BR diagonal) for drop-in comparability in notebooks.
+"""
+
+import numpy as np
+
+from dvfopt.jacobian.shoelace import _ref_grid
+
+
+def _triangle_areas_2d(dy, dx):
+    """Signed areas of the per-pixel two-triangle pair, TR-BL diagonal.
+
+    Parameters
+    ----------
+    dy, dx : ndarray, shape ``(H, W)``
+
+    Returns
+    -------
+    T1, T2 : tuple of ndarray, shape ``(H-1, W-1)`` each
+        ``T1[y, x]`` = signed area of triangle at pixel ``(x+1, y)``
+        (lower-right triangle of cell (y, x) under TR-BL split).
+        ``T2[y, x]`` = signed area of triangle at pixel ``(x, y)``
+        (upper-left triangle of cell (y, x) under TR-BL split).
+        Positive = valid under the +y-down convention.
+    """
+    H, W = dy.shape
+    ref_y, ref_x = _ref_grid(H, W)
+    def_x = ref_x + dx
+    def_y = ref_y + dy
+
+    # Cell (y, x) has corners at pixels (x, y), (x+1, y), (x, y+1), (x+1, y+1).
+    # Slice the warped grid to extract each corner over all cells.
+    x_tl, y_tl = def_x[:-1, :-1], def_y[:-1, :-1]   # (x,   y)
+    x_tr, y_tr = def_x[:-1, 1:],  def_y[:-1, 1:]    # (x+1, y)
+    x_bl, y_bl = def_x[1:, :-1],  def_y[1:, :-1]    # (x,   y+1)
+    x_br, y_br = def_x[1:, 1:],   def_y[1:, 1:]     # (x+1, y+1)
+
+    # T1 at pixel (x+1, y): vertices A=(x+1, y), B=(x, y+1), C=(x+1, y+1)
+    #   AB = BL - TR,  AC = BR - TR
+    AB_x = x_bl - x_tr
+    AB_y = y_bl - y_tr
+    AC_x = x_br - x_tr
+    AC_y = y_br - y_tr
+    T1 = -0.5 * (AB_x * AC_y - AB_y * AC_x)
+
+    # T2 at pixel (x, y): vertices A=(x, y), B=(x, y+1), C=(x+1, y)
+    #   AB = BL - TL,  AC = TR - TL
+    AB_x = x_bl - x_tl
+    AB_y = y_bl - y_tl
+    AC_x = x_tr - x_tl
+    AC_y = y_tr - y_tl
+    T2 = -0.5 * (AB_x * AC_y - AB_y * AC_x)
+
+    return T1, T2
+
+
+def _triangle_signs_2d(dy, dx):
+    """Sign of each per-pixel triangle area in {-1, 0, +1}.
+
+    Returns ndarray of shape ``(2, H-1, W-1)``, dtype ``int8``.
+    Channel 0 = sign(T1), channel 1 = sign(T2).
+    """
+    T1, T2 = _triangle_areas_2d(dy, dx)
+    return np.stack([np.sign(T1), np.sign(T2)]).astype(np.int8)
+
+
+def triangle_sign_det2D(phi_xy):
+    """Per-pixel two-triangle sign check from a ``(2, H, W)`` phi array.
+
+    Parameters
+    ----------
+    phi_xy : ndarray, shape ``(2, H, W)``
+        Channels ``[dy, dx]`` (same convention as ``shoelace_det2D``).
+
+    Returns
+    -------
+    ndarray, shape ``(2, H-1, W-1)``, dtype ``int8``
+        Signs in {-1, 0, +1}. Positive = valid, zero = collapsed,
+        negative = flipped.
+    """
+    H, W = phi_xy.shape[-2:]
+    dy = phi_xy[0].reshape(H, W)
+    dx = phi_xy[1].reshape(H, W)
+    return _triangle_signs_2d(dy, dx)
+
+
+def triangle_sign_count_negatives(phi_xy):
+    """Count of per-pixel triangles with sign <= 0 (flips + collapses).
+
+    Convenience scalar for comparing against
+    ``(jacobian_det2D(phi) <= 0).sum()``.
+    """
+    return int((triangle_sign_det2D(phi_xy) <= 0).sum())
+
+
+def triangle_sign_areas2D(phi_xy):
+    """Signed areas (not just signs) of the per-pixel two-triangle check.
+
+    Smooth in the deformation — suitable as a constraint value for SLSQP
+    or L-BFGS-B penalty methods. For a sign-only test use
+    :func:`triangle_sign_det2D`.
+
+    Parameters
+    ----------
+    phi_xy : ndarray, shape ``(2, H, W)``
+        Channels ``[dy, dx]``.
+
+    Returns
+    -------
+    ndarray, shape ``(2, H-1, W-1)``
+        Signed areas; positive = valid, negative = flip.
+    """
+    H, W = phi_xy.shape[-2:]
+    dy = phi_xy[0].reshape(H, W)
+    dx = phi_xy[1].reshape(H, W)
+    T1, T2 = _triangle_areas_2d(dy, dx)
+    return np.stack([T1, T2])
+
+
+def triangle_sign_constraint(phi_xy, submatrix_size, exclude_boundaries=False):
+    """Flattened 2-triangle signed areas for an SLSQP ``NonlinearConstraint``.
+
+    Takes a flattened phi vector packed as ``[dx_flat, dy_flat]`` (same
+    convention as ``shoelace_constraint``) and the submatrix ``(H, W)``.
+    Returns a 1-D array of length ``2 * (H-1) * (W-1)`` (or fewer if
+    ``exclude_boundaries=True``).
+    """
+    from dvfopt._defaults import _unpack_size
+    sy, sx = _unpack_size(submatrix_size)
+    pixels = sy * sx
+    dx = phi_xy[:pixels].reshape((sy, sx))
+    dy = phi_xy[pixels:].reshape((sy, sx))
+    T1, T2 = _triangle_areas_2d(dy, dx)
+    if exclude_boundaries:
+        T1 = T1[1:-1, 1:-1]
+        T2 = T2[1:-1, 1:-1]
+    return np.concatenate([T1.flatten(), T2.flatten()])
