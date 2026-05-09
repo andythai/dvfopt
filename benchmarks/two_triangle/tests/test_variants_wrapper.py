@@ -31,3 +31,17 @@ def test_combinatorial_prefix_reduces_or_preserves_folds():
     result = fn(dvf, threshold=0.01, max_iterations=0)  # only prefix, no SLSQP
     final_fc = fold_counts(result.phi_final, threshold=0.01)
     assert final_fc["fold_count_tri"] <= init_fc["fold_count_tri"]
+
+
+def test_multigrid_registered():
+    assert "multigrid" in registry.list_variants()
+
+
+def test_multigrid_runs_2d():
+    fn = registry.get_variant("multigrid")
+    dvf = _tiny_2d_fold()
+    # 6x6 is too small for two-level cascade (downsampling to 3x3 wouldn't
+    # give a meaningful warm-start), but the variant should still produce
+    # a valid result by skipping levels that are too small.
+    result = fn(dvf, threshold=0.01, max_iterations=10)
+    assert result.phi_final.shape == (2, 6, 6)
