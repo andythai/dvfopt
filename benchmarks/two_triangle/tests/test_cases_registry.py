@@ -86,3 +86,23 @@ def test_random_3d_high_severity_has_folds(name):
     dvf, _ = fn()
     fc = fold_counts(dvf, threshold=0.01)
     assert fc["fold_count_jdet"] > 0
+
+
+REAL_CASES = (
+    "real2d_slice90_64x91",
+    "real2d_slice200_64x91",
+    "real3d_slice090_5x10x10",
+    "real3d_slice200_5x10x10",
+)
+
+
+@pytest.mark.parametrize("name", REAL_CASES)
+def test_real_case_registered(name):
+    assert name in registry.list_cases()
+    fn = registry.get_case(name)
+    try:
+        dvf, meta = fn()
+    except FileNotFoundError:
+        pytest.skip(f"{name}: data file not present (expected; .npy files are gitignored)")
+    assert dvf.ndim == 4 and dvf.shape[0] == 3
+    assert "title" in meta
