@@ -38,3 +38,16 @@ def test_soft_margin_trajectory_monotonic_on_synthetic():
     # Allow at most one "blip" of magnitude 1 (sub-window optimisation may
     # transiently introduce a fold during boundary repositioning).
     assert (diffs > 1).sum() == 0
+
+
+def test_active_set_registered():
+    assert "active_set" in registry.list_variants()
+
+
+def test_active_set_runs_and_progresses():
+    fn = registry.get_variant("active_set")
+    dvf = _tiny_2d_fold()
+    result = fn(dvf, threshold=0.01, max_iterations=20)
+    assert len(result.trajectory) >= 2
+    assert result.trajectory.iloc[-1]["fold_count_tri"] <= \
+           result.trajectory.iloc[0]["fold_count_tri"]
