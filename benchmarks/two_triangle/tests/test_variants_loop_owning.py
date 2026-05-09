@@ -51,3 +51,17 @@ def test_active_set_runs_and_progresses():
     assert len(result.trajectory) >= 2
     assert result.trajectory.iloc[-1]["fold_count_tri"] <= \
            result.trajectory.iloc[0]["fold_count_tri"]
+
+
+def test_trust_constr_registered():
+    assert "trust_constr" in registry.list_variants()
+
+
+def test_trust_constr_runs():
+    fn = registry.get_variant("trust_constr")
+    dvf = _tiny_2d_fold()
+    result = fn(dvf, threshold=0.01, max_iterations=20)
+    assert result.phi_final.shape == (2, 6, 6)
+    # trust-constr is more relaxed than SLSQP — only require non-regression
+    assert result.trajectory.iloc[-1]["fold_count_tri"] <= \
+           result.trajectory.iloc[0]["fold_count_tri"]
