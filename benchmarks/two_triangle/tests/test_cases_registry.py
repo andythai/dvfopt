@@ -61,3 +61,28 @@ def test_synthetic_3d_case_has_initial_folds(name):
     dvf, _ = fn()
     fc = fold_counts(dvf, threshold=0.01)
     assert fc["fold_count_jdet"] > 0
+
+
+RANDOM_3D = (
+    "rand3d_grid16_low",  "rand3d_grid16_high",
+    "rand3d_grid24_low",  "rand3d_grid24_high",
+    "rand3d_grid32_low",  "rand3d_grid32_high",
+)
+
+
+@pytest.mark.parametrize("name", RANDOM_3D)
+def test_random_3d_case_registered(name):
+    assert name in registry.list_cases()
+    fn = registry.get_case(name)
+    dvf, meta = fn()
+    assert dvf.ndim == 4 and dvf.shape[0] == 3 and dvf.shape[1] >= 2
+    assert meta.get("dim") == 3
+
+
+@pytest.mark.parametrize("name", ("rand3d_grid16_high", "rand3d_grid32_high"))
+def test_random_3d_high_severity_has_folds(name):
+    from benchmarks.two_triangle.metrics import fold_counts
+    fn = registry.get_case(name)
+    dvf, _ = fn()
+    fc = fold_counts(dvf, threshold=0.01)
+    assert fc["fold_count_jdet"] > 0
