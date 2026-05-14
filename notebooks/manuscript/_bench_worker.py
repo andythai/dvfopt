@@ -195,6 +195,40 @@ def _interior_pack_unpack_2d(phi_win, interior_mask):
     return pack, unpack, n_int
 
 
+def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
+                       threshold, max_iter, send):
+    """2D L2 SLSQP with 2-triangle constraint, frozen-edge interior mask."""
+    try:
+        from dvfopt.jacobian.triangle_sign import _triangle_areas_2d
+        pack, unpack, n_int = _interior_pack_unpack_2d(phi_win, interior_mask)
+        if n_int == 0:
+            send.send(('ok', phi_win.copy(), {'nit': 0, 'success': True, 'status': 0}))
+            return
+        z_init = pack(phi_win)
+        z_anchor = pack(phi_anchor_win)
+
+        def obj(z):
+            d = z - z_anchor
+            return 0.5 * float(np.dot(d, d)), d
+
+        def constr(z):
+            phi = unpack(z, phi_win)
+            T1, T2 = _triangle_areas_2d(phi[0], phi[1])
+            return np.concatenate([T1.flatten(), T2.flatten()])
+
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
+        res = minimize(obj, z_init, jac=True, method='SLSQP', constraints=[nl],
+                       options={'maxiter': max_iter, 'disp': False})
+        info = {'nit': int(res.nit), 'success': bool(res.success),
+                'status': int(res.status)}
+        send.send(('ok', unpack(res.x, phi_win), info))
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        send.send(('err', f'{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=4)}'))
+    finally:
+        send.close()
+
+
 def local_l1_2d_worker(phi_win, phi_anchor_win, interior_mask,
                        threshold, eps, max_iter, send):
     """2D smoothed-L1 SLSQP with 2-triangle constraint."""
