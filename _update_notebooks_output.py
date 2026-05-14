@@ -110,9 +110,11 @@ def normalize_benchmark_utils_imports(cell_source):
     normalized = []
     for idx, line in enumerate(cell_source):
         if "from benchmark_utils" in line and not line.lstrip().startswith("from benchmark_utils"):
-            prefix, suffix = line.split("from benchmark_utils", 1)
+            split_at = line.index("from benchmark_utils")
+            prefix = line[:split_at]
+            suffix = line[split_at:]
             normalized.append(prefix + "\n")
-            normalized.append("from benchmark_utils" + suffix)
+            normalized.append(suffix)
         else:
             if (
                 idx + 1 < len(cell_source)
