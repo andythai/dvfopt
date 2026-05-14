@@ -1,5 +1,9 @@
-"""Smoke test: run the 3D windowed L2 outer loop on a small ROI to verify
-the subprocess-per-window timeout works and we make per-iter progress.
+"""Smoke test: 3D windowed L2 outer loop with center-on-worst-cell strategy.
+
+Replaces the "component bbox" window with a fixed-size cube centered
+on the worst-fold cell. Keeps the worst cell well inside the interior
+(away from the frozen boundary) so SLSQP actually has degrees of
+freedom to fix it.
 """
 
 import os
@@ -17,7 +21,7 @@ sys.path.insert(0, _HERE)
 
 from dvfopt import DEFAULT_PARAMS
 import _bench_worker
-from _bench_worker import tet_signed_volumes, _CUBE_CORNERS
+from _bench_worker import tet_signed_volumes
 
 THRESHOLD = DEFAULT_PARAMS['threshold']
 EPS_L1 = 1e-4
@@ -47,111 +51,105 @@ def _run_worker_with_timeout(target, args, timeout_s):
     return 'timeout', None, {'wall_time': time.time() - t0}
 
 
-def _shrink_to_cap(z0, z1, y0, y1, x0, x1, cap_per_axis, cap_total):
-    def shrink_axis(a0, a1, cap):
-        if a1 - a0 <= cap:
-            return a0, a1
-        ctr = (a0 + a1) // 2
-        half = cap // 2
-        return max(a0, ctr - half), min(a1, ctr - half + cap)
-    z0, z1 = shrink_axis(z0, z1, cap_per_axis)
-    y0, y1 = shrink_axis(y0, y1, cap_per_axis)
-    x0, x1 = shrink_axis(x0, x1, cap_per_axis)
-    while (z1-z0)*(y1-y0)*(x1-x0) > cap_total:
-        spans = [(z1-z0, 'z'), (y1-y0, 'y'), (x1-x0, 'x')]
-        spans.sort(reverse=True)
-        ax = spans[0][1]
-        if ax == 'z' and z1 - z0 > 2:
-            z1 -= 1
-        elif ax == 'y' and y1 - y0 > 2:
-            y1 -= 1
-        elif ax == 'x' and x1 - x0 > 2:
-            x1 -= 1
-        else:
-            break
-    return z0, z1, y0, y1, x0, x1
+def centered_window(focus_cell, half_size, grid_shape):
+    """Cell-bbox centered on `focus_cell` with `half_size` cells of border
+    on each side. Clamps to the grid. Returns (z0,z1,y0,y1,x0,x1).
+    """
+    cz, cy, cx = focus_cell
+    Dc, Hc, Wc = grid_shape
+    z0 = max(0, cz - half_size); z1 = min(Dc, cz + half_size + 1)
+    y0 = max(0, cy - half_size); y1 = min(Hc, cy + half_size + 1)
+    x0 = max(0, cx - half_size); x1 = min(Wc, cx + half_size + 1)
+    return int(z0), int(z1), int(y0), int(y1), int(x0), int(x1)
 
 
-def main():
-    print('Loading data...', flush=True)
+def smoke_run(half_size, max_outer, max_minimize_iter, local_timeout_s,
+              roi):
+    print(f'\n=== smoke run: half_size={half_size}  max_outer={max_outer} ===',
+          flush=True)
     phi_full = np.load(DATA_PATH)
-    print(f'shape: {phi_full.shape}', flush=True)
-
-    # Pick a small ROI around a folded region. Use slice z=126 area
-    # (lightest folded slice from 2D scan) +- a few z's.
-    roi = (124, 130, 100, 180, 100, 200)  # (z0,z1,y0,y1,x0,x1)
     z0,z1,y0,y1,x0,x1 = roi
     phi = phi_full[:, z0:z1, y0:y1, x0:x1].copy()
     phi_anchor = phi.copy()
-    print(f'ROI shape: {phi.shape}  ({roi})', flush=True)
-
-    V0 = tet_signed_volumes(phi)
-    n_neg = int((V0 <= 0).sum())
-    print(f'Initial: n_neg_tet={n_neg}  min_tet={float(V0.min()):+.4f}'
-          f'  cells_folded={int((V0.min(axis=0)<=0).sum())}', flush=True)
-
+    print(f'ROI shape: {phi.shape}', flush=True)
+    V = tet_signed_volumes(phi)
+    n_neg = int((V <= 0).sum())
+    print(f'Initial: n_neg_tet={n_neg}  min_tet={float(V.min()):+.4f}'
+          f'  cells_folded={int((V.min(axis=0)<=0).sum())}', flush=True)
     if n_neg == 0:
-        print('ROI has no folds -- pick a different ROI.')
         return
-
-    L2_TIMEOUT_S = 30
-    MAX_OUTER = 30
-    MAX_WINDOW_CELLS = 800
-    MAX_WINDOW_PER_AXIS = 12
-    MAX_MINIMIZE_ITER = 200
-
-    total_t = 0.0
-    for outer in range(MAX_OUTER):
+    Dc, Hc, Wc = V.shape[1:]
+    last_n_neg = None
+    stall = 0
+    t_total = 0.0
+    for outer in range(max_outer):
         V = tet_signed_volumes(phi)
         n_neg = int((V <= 0).sum())
         if n_neg == 0:
-            print(f'  outer={outer}  n_neg=0 -- DONE', flush=True)
+            print(f'  outer={outer}  DONE n_neg=0', flush=True)
             break
-        cell_fold_mask = V.min(axis=0) <= THRESHOLD - 1e-9
-        labels, _ = cc_label(cell_fold_mask)
-        argmin_flat = int(V.argmin())
-        ti, cz, cy, cx = np.unravel_index(argmin_flat, V.shape)
-        cid = labels[cz, cy, cx]
-        comp = np.argwhere(labels == cid)
-        wz0, wy0, wx0 = comp.min(axis=0); wz1, wy1, wx1 = comp.max(axis=0) + 1
-        Dc, Hc, Wc = labels.shape
-        wz0 = max(0, wz0 - 1); wy0 = max(0, wy0 - 1); wx0 = max(0, wx0 - 1)
-        wz1 = min(Dc, wz1 + 1); wy1 = min(Hc, wy1 + 1); wx1 = min(Wc, wx1 + 1)
-        wz0, wz1, wy0, wy1, wx0, wx1 = _shrink_to_cap(
-            wz0, wz1, wy0, wy1, wx0, wx1,
-            cap_per_axis=MAX_WINDOW_PER_AXIS, cap_total=MAX_WINDOW_CELLS)
+        # Worst-fold cell.
+        cell_min = V.min(axis=0)
+        argmin_flat = int(cell_min.argmin())
+        cz, cy, cx = np.unravel_index(argmin_flat, cell_min.shape)
+        wz0, wz1, wy0, wy1, wx0, wx1 = centered_window(
+            (cz, cy, cx), half_size=half_size, grid_shape=cell_min.shape)
         sz, sy, sx = wz1-wz0, wy1-wy0, wx1-wx0
         vz = slice(wz0, wz1+1); vy = slice(wy0, wy1+1); vx = slice(wx0, wx1+1)
         phi_win = phi[:, vz, vy, vx].copy()
         phi_anchor_win = phi_anchor[:, vz, vy, vx].copy()
-        interior = np.zeros((sz+1, sy+1, sx+1), dtype=bool)
-        if sz+1 > 2 and sy+1 > 2 and sx+1 > 2:
+        vsz, vsy, vsx = sz+1, sy+1, sx+1
+        interior = np.zeros((vsz, vsy, vsx), dtype=bool)
+        if vsz > 2 and vsy > 2 and vsx > 2:
             interior[1:-1, 1:-1, 1:-1] = True
         t0 = time.time()
         status, payload, info = _run_worker_with_timeout(
             _bench_worker.local_l2_3d_worker,
-            (phi_win, phi_anchor_win, interior, THRESHOLD, MAX_MINIMIZE_ITER),
-            timeout_s=L2_TIMEOUT_S)
+            (phi_win, phi_anchor_win, interior, THRESHOLD, max_minimize_iter),
+            timeout_s=local_timeout_s)
         elapsed = time.time() - t0
-        total_t += elapsed
+        t_total += elapsed
         if status == 'ok':
             phi_new, info_w = payload
             phi[:, vz, vy, vx] = phi_new
             V2 = tet_signed_volumes(phi)
             n_neg_after = int((V2 <= 0).sum())
-            print(f'  outer={outer:>2d}  win={sz}x{sy}x{sx}  '
-                  f'n_neg {n_neg}->{n_neg_after}  '
-                  f'min_tet {float(V.min()):+.3f}->{float(V2.min()):+.3f}  '
-                  f'slsqp_nit={info_w["nit"]} ok={info_w["success"]}  t={elapsed:.1f}s',
-                  flush=True)
+            min_tet_after = float(V2.min())
+            if outer % 5 == 0 or n_neg_after != n_neg:
+                print(f'  outer={outer:>3d}  win={sz}x{sy}x{sx} (centered on {cz},{cy},{cx})  '
+                      f'n_neg {n_neg}->{n_neg_after}  '
+                      f'min_tet {float(V.min()):+.3f}->{min_tet_after:+.3f}  '
+                      f'slsqp_nit={info_w["nit"]} ok={info_w["success"]}  t={elapsed:.1f}s',
+                      flush=True)
         elif status == 'timeout':
-            print(f'  outer={outer:>2d}  win={sz}x{sy}x{sx}  TIMEOUT after {elapsed:.1f}s'
-                  f'  n_neg stays {n_neg}', flush=True)
+            print(f'  outer={outer:>3d}  TIMEOUT after {elapsed:.1f}s', flush=True)
         else:
-            print(f'  outer={outer:>2d}  ERR  {payload[0][:100]}', flush=True)
+            print(f'  outer={outer:>3d}  ERR {payload[0][:120]}', flush=True)
+        T = tet_signed_volumes(phi)
+        n_now = int((T <= 0).sum())
+        if last_n_neg is None or n_now < last_n_neg:
+            stall = 0
+        else:
+            stall += 1
+        last_n_neg = n_now
+        if stall >= 20:
+            print(f'  STALLED at outer={outer}  n_neg={n_now}', flush=True)
+            break
     V = tet_signed_volumes(phi)
     n_neg_final = int((V <= 0).sum())
-    print(f'\nDONE  final n_neg={n_neg_final}  total t={total_t:.1f}s', flush=True)
+    print(f'\nDONE  final n_neg={n_neg_final}  total t={t_total:.1f}s'
+          f'  L1={float(np.abs(phi-phi_anchor).sum()):.2f}', flush=True)
+
+
+def main():
+    # Deeper ROI so the worst-fold cell isn't always pinned to a z-edge.
+    # 30 slices is enough to host half_size=5 windows with room to spare;
+    # the y/x extent of 80x100 keeps the cell count modest.
+    roi = (110, 140, 100, 180, 100, 200)
+    for half_size in [4, 6]:
+        smoke_run(half_size=half_size,
+                  max_outer=80, max_minimize_iter=300,
+                  local_timeout_s=30, roi=roi)
 
 
 if __name__ == '__main__':
