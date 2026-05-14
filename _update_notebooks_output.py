@@ -106,28 +106,34 @@ def make_save_cell():
 
 
 def normalize_benchmark_utils_imports(cell_source):
-    """Split any benchmark_utils import accidentally fused onto a prior line."""
+    """Split fused benchmark_utils imports across adjacent lines or one source string."""
     normalized = []
+    marker = "from benchmark_utils"
     for idx, line in enumerate(cell_source):
         if (
             idx + 1 < len(cell_source)
             and not line.endswith("\n")
-            and cell_source[idx + 1].lstrip().startswith("from benchmark_utils")
+            and cell_source[idx + 1].lstrip().startswith(marker)
         ):
             line = line + "\n"
 
-        if "from benchmark_utils" not in line:
-            normalized.append(line)
-            continue
-
-        parts = re.split(r"(from benchmark_utils)", line)
-        current = parts[0]
-        for marker, suffix in zip(parts[1::2], parts[2::2]):
-            if current:
-                normalized.append(current + "\n")
-            current = marker + suffix
-        if current:
+        current = line
+        while True:
+            stripped = current.lstrip()
+            if stripped.startswith(marker):
+                next_marker = current.find(marker, current.find(marker) + len(marker))
+                if next_marker != -1:
+                    normalized.append(current[:next_marker] + "\n")
+                    current = current[next_marker:]
+                    continue
+            elif stripped.startswith(("from ", "import ")):
+                first = current.find(marker)
+                if first > 0:
+                    normalized.append(current[:first] + "\n")
+                    current = current[first:]
+                    continue
             normalized.append(current)
+            break
     return normalized
 
 
