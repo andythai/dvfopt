@@ -23,13 +23,32 @@ to `notebooks/manuscript/output/{2d_real_full,3d_real_full}/`:
 - `run.log` — per-slice progress log
 - `summary.json` plus PDF/PNG summary plots after the run
 
-## How to launch the 2D full run
+## How to launch
 
-Open a separate terminal in this repo and run:
+Open separate terminals in this repo and run:
 
 ```powershell
+# 2D benchmark (per-slice, 528 slices)
 python notebooks\manuscript\_run_2d_full.py
+
+# 3D benchmark (fold-clustered, processes one crop per connected fold component)
+python notebooks\manuscript\_run_3d_clusters.py
 ```
+
+`_run_3d_clusters.py` is the recommended 3D entrypoint. It pre-computes
+the connected components of folded cells in the volume, then runs
+notebook-18-style multi-pass full-grid L2 + L1 polish on each
+component's bounding-box crop. Components sorted by size desc, so a
+partial run still hits the heaviest fold regions first. Components
+whose bbox exceeds the SLSQP-tractable size are flagged ``skipped`` in
+the CSV (still informative -- shows where the recipe runs out of
+headroom).
+
+The earlier ``_run_3d_full.py`` (windowed) and ``_run_3d_crops.py``
+(per-cell full-scan) entrypoints are kept for reference but not
+recommended for the full real DVF -- the windowed solver hits the
+boundary-freeze degeneracy, and the per-cell full-scan generates
+~350K crops which is impractical even with fast skip paths.
 
 That's it. The script writes `output/2d_real_full/run.log` and the CSV
 as it goes. It is **resumable**: any z's already in `per_slice.csv` are

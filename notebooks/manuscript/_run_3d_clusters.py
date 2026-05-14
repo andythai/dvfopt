@@ -17,6 +17,7 @@ import multiprocessing as mp
 import numpy as np
 import pandas as pd
 from scipy.ndimage import label as cc_label
+from scipy.ndimage import find_objects, sum_labels
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
@@ -152,34 +153,46 @@ def enumerate_clusters(phi, border, max_axis, max_cells):
     """Return list of (cluster_id, z0, z1, y0, y1, x0, x1, comp_cells, comp_neg, skipped).
 
     Each cluster is one connected component of cell_fold_mask, with its
-    bbox padded by `border` cells and clipped to the grid. Components
-    whose padded bbox exceeds `max_axis` or `max_cells` are flagged
-    skipped (still written to CSV so the user sees them).
+    bbox padded by `border` cells and clipped to the grid. Uses
+    ``scipy.ndimage.find_objects`` to get all bboxes in one pass --
+    crucial when there are tens of thousands of components.
     """
     V = tet_signed_volumes(phi)
     cell_fold_mask = V.min(axis=0) <= 0
     labels, n_comp = cc_label(cell_fold_mask)
     Dc, Hc, Wc = cell_fold_mask.shape
     log_line(f'cell_fold_mask: {int(cell_fold_mask.sum())} folded cells, {n_comp} components')
+
+    # All bboxes in one pass (returns list of n_comp slice-tuples or None).
+    bboxes = find_objects(labels)
+    # Component sizes in one pass.
+    sizes = np.bincount(labels.ravel(), minlength=n_comp + 1)[1:]
+    # Sort components by size desc -- heaviest work first so a partial
+    # run still hits the most consequential clusters.
+    order = np.argsort(-sizes)
+
+    # Per-component fold-tet count: V has shape (6, Dc, Hc, Wc) so we
+    # need a label volume that matches. Compute "folded tets per cell"
+    # by counting (V<=0) along axis 0 (shape (Dc,Hc,Wc)), then sum that
+    # over each component's label mask.
+    folded_tet_per_cell = (V <= 0).sum(axis=0).astype(np.int32)
+    fold_tets_per_label = sum_labels(folded_tet_per_cell, labels=labels,
+                                      index=np.arange(1, n_comp + 1))
+
     clusters = []
-    # Sort components by size desc so heavier work happens first (and so a
-    # partial run still hits the most consequential clusters).
-    sizes = np.bincount(labels.ravel())
-    order = np.argsort(-sizes[1:]) + 1  # skip label 0 = background
-    for rank, cid in enumerate(order):
-        cells = np.argwhere(labels == cid)
-        if len(cells) == 0:
+    for rank, idx in enumerate(order):
+        cid = int(idx) + 1   # 1-indexed component label
+        bbox = bboxes[idx]   # tuple of 3 slices or None
+        if bbox is None:
             continue
-        z0, y0, x0 = cells.min(axis=0)
-        z1, y1, x1 = cells.max(axis=0) + 1
+        z0, z1 = bbox[0].start, bbox[0].stop
+        y0, y1 = bbox[1].start, bbox[1].stop
+        x0, x1 = bbox[2].start, bbox[2].stop
         z0 = max(0, z0 - border); y0 = max(0, y0 - border); x0 = max(0, x0 - border)
         z1 = min(Dc, z1 + border); y1 = min(Hc, y1 + border); x1 = min(Wc, x1 + border)
         sz = z1 - z0; sy = y1 - y0; sx = x1 - x0
-        # Per-component fold tet count.
-        Vc_mask = (labels[z0:z1, y0:y1, x0:x1] == cid)
-        comp_neg = int((V[:, z0:z1, y0:y1, x0:x1] <= 0).sum() * 0
-                       + ((V[:, z0:z1, y0:y1, x0:x1] <= 0) & Vc_mask[None]).sum())
-        comp_cells = int(Vc_mask.sum())
+        comp_cells = int(sizes[idx])
+        comp_neg = int(fold_tets_per_label[idx])
         skipped = sz > max_axis or sy > max_axis or sx > max_axis or sz*sy*sx > max_cells
         clusters.append((rank, int(z0), int(z1), int(y0), int(y1), int(x0), int(x1),
                           comp_cells, comp_neg, skipped))
