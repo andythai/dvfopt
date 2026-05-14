@@ -209,16 +209,63 @@ def results_to_rows(results, extra_cols=None):
     base_cols = ["case", "n_neg_init", "n_neg_final", "min_jdet_init",
                  "min_jdet", "l2_err", "time"]
     extra = extra_cols or []
+
+    def _round_if_float(value):
+        if isinstance(value, float):
+            return round(value, 6)
+        return value
+
+    def _has_metrics(payload):
+        return isinstance(payload, dict) and any(
+            key in payload for key in ("n_neg_final", "neg", "min_jdet", "l2_err", "l2", "time")
+        )
+
+    def _get_value(payload, key):
+        aliases = {
+            "n_neg_final": ("n_neg_final", "neg"),
+            "l2_err": ("l2_err", "l2"),
+        }
+        for candidate in aliases.get(key, (key,)):
+            if candidate in payload:
+                return payload[candidate]
+        if key == "min_jdet_init" and "jac_init" in payload:
+            return float(np.min(payload["jac_init"]))
+        if key == "n_neg_init" and "jac_init" in payload:
+            return int(np.sum(np.asarray(payload["jac_init"]) <= 0))
+        return None
+
+    rows = []
+    include_method = False
     columns = base_cols + extra
     rows = []
     for label, r in results.items():
+        nested = {
+            name: value
+            for name, value in r.items()
+            if _has_metrics(value)
+        }
+        if nested:
+            include_method = True
+            shared = {
+                name: value
+                for name, value in r.items()
+                if name not in nested
+            }
+            for method, payload in nested.items():
+                merged = {**shared, **payload}
+                row = {"case": label, "method": method}
+                for c in base_cols[1:] + extra:
+                    row[c] = _round_if_float(_get_value(merged, c))
+                rows.append(row)
+            continue
+
         row = {"case": label}
         for c in base_cols[1:] + extra:
-            val = r.get(c)
-            if isinstance(val, float):
-                val = round(val, 6)
-            row[c] = val
+            row[c] = _round_if_float(_get_value(r, c))
         rows.append(row)
+
+    if include_method:
+        columns = ["case", "method"] + base_cols[1:] + extra
     return rows, columns
 
 
