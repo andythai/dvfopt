@@ -51,11 +51,9 @@ EPS_L1 = 1e-4
 #   4. interior_mask = voxel corners adjacent to any cell in the
 #      dilated component. Slice-edge corners are naturally movable
 #      (no outside cell to constrain).
-MERGE_DILATION = 2  # MERGE=2 + rectangular interior_mask achieves 178->0
-                    # on z=126 in 7.8s (vs 178->13 with MERGE=1 + component-
-                    # shaped mask). Wider movable region gives SLSQP enough
-                    # degrees of freedom to fix severe folds; merging
-                    # adjacent fold regions ensures they solve together.
+MERGE_DILATION = 2          # Starting value. Escalates dynamically per slice.
+MERGE_DILATION_MAX = 6      # cap for escalation; beyond this clusters get too big
+STALL_ITERS_BEFORE_ESCALATE = 2  # # of non-improving outer iters before MERGE++
 BBOX_PAD = 1
 MAX_CLUSTER_CELLS = 2000         # crops above this are skipped (over SLSQP cap)
 MAX_CLUSTER_PER_AXIS = 60
@@ -213,22 +211,23 @@ def _component_corner_mask(component_mask, h, w):
     return corner_mask
 
 
-def enumerate_clusters_2d(phi_slice, max_axis, max_cells):
+def enumerate_clusters_2d(phi_slice, max_axis, max_cells, merge_dilation=None):
     """phi_slice: (2, H, W). Returns list of cluster dicts.
 
-    Fold cells (min(T1, T2) <= 0) are dilated by ``MERGE_DILATION`` then
-    connected-component labeled, so fold regions within MERGE_DILATION
-    cells of each other end up in the same cluster (they share corners
-    via the gap cells, so solving them independently can have them
-    fight each other).
+    Fold cells (min(T1, T2) <= 0) are dilated by ``merge_dilation`` (defaults
+    to module-level ``MERGE_DILATION``) then connected-component labeled, so
+    fold regions within ``merge_dilation`` cells of each other end up in the
+    same cluster.
     """
+    if merge_dilation is None:
+        merge_dilation = MERGE_DILATION
     T1, T2 = _triangle_areas_2d(phi_slice[0], phi_slice[1])
     cell_min = np.minimum(T1, T2)
     cell_fold_mask = cell_min <= 0
     if not cell_fold_mask.any():
         return []
-    if MERGE_DILATION > 0:
-        merged_mask = binary_dilation(cell_fold_mask, iterations=MERGE_DILATION)
+    if merge_dilation > 0:
+        merged_mask = binary_dilation(cell_fold_mask, iterations=merge_dilation)
     else:
         merged_mask = cell_fold_mask
     labels, n_comp = cc_label(merged_mask)
@@ -484,12 +483,15 @@ def process_one_slice(z, phi_full, phi_anchor_full, executor=None):
     # re-solve until n_neg = 0 or no improvement.
     prev_n_neg = init_n_neg
     t_slice_start = time.time()
+    cur_merge = MERGE_DILATION
+    stall_count = 0
     for outer_it in range(MAX_CLUSTER_OUTER_ITERS):
         if time.time() - t_slice_start > MAX_SLICE_TIME_S:
             break
         clusters = enumerate_clusters_2d(phi_slice,
                                           MAX_CLUSTER_PER_AXIS,
-                                          MAX_CLUSTER_CELLS)
+                                          MAX_CLUSTER_CELLS,
+                                          merge_dilation=cur_merge)
         if not clusters:
             break
         total_clusters += len(clusters)
@@ -564,6 +566,19 @@ def process_one_slice(z, phi_full, phi_anchor_full, executor=None):
             break
         if not any_processed_this_pass:
             break
+        # Dynamic MERGE escalation: if n_neg didn't drop this iter,
+        # the current cluster geometry is stuck. Bump merge_dilation so
+        # adjacent fold regions get pulled into bigger joint clusters
+        # with more degrees of freedom.
+        if n_neg_now >= prev_n_neg:
+            stall_count += 1
+            if (stall_count >= STALL_ITERS_BEFORE_ESCALATE
+                    and cur_merge < MERGE_DILATION_MAX):
+                cur_merge += 1
+                stall_count = 0
+                log_line(f'    [z={z} outer={outer_it}] stall -> escalating MERGE_DILATION to {cur_merge}')
+        else:
+            stall_count = 0
         prev_n_neg = n_neg_now
     T1_f, T2_f = _triangle_areas_2d(phi_slice[0], phi_slice[1])
     after_l1_n_neg = int((T1_f <= 0).sum() + (T2_f <= 0).sum())
