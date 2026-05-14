@@ -105,8 +105,28 @@ def make_save_cell():
     }
 
 
+def normalize_benchmark_utils_imports(cell_source):
+    """Split any benchmark_utils import accidentally fused onto a prior line."""
+    normalized = []
+    for idx, line in enumerate(cell_source):
+        if "from benchmark_utils" in line and not line.lstrip().startswith("from benchmark_utils"):
+            prefix, suffix = line.split("from benchmark_utils", 1)
+            normalized.append(prefix + "\n")
+            normalized.append("from benchmark_utils" + suffix)
+        else:
+            if (
+                idx + 1 < len(cell_source)
+                and not line.endswith("\n")
+                and cell_source[idx + 1].lstrip().startswith("from benchmark_utils")
+            ):
+                line = line + "\n"
+            normalized.append(line)
+    return normalized
+
+
 def ensure_imports(cell_source, needed):
     """Ensure benchmark_utils imports include the needed functions."""
+    cell_source = normalize_benchmark_utils_imports(cell_source)
     joined = "".join(cell_source)
     if "from benchmark_utils" not in joined:
         return cell_source  # no benchmark_utils import at all — skip
@@ -126,11 +146,14 @@ def ensure_imports(cell_source, needed):
 
     # Add missing imports: append a new import line
     extra_line = f"from benchmark_utils import {', '.join(missing)}\n"
+    if cell_source and not cell_source[-1].endswith("\n"):
+        extra_line = "\n" + extra_line
     return cell_source + [extra_line]
 
 
 def add_benchmark_utils_import(cell_source, needed):
     """If cell has dvfopt imports but no benchmark_utils, add one."""
+    cell_source = normalize_benchmark_utils_imports(cell_source)
     joined = "".join(cell_source)
     if "benchmark_utils" in joined:
         return ensure_imports(cell_source, needed)
