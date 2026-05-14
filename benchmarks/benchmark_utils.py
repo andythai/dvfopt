@@ -231,7 +231,7 @@ def results_to_rows(results, extra_cols=None):
         if key == "min_jdet_init" and "jac_init" in payload:
             return float(np.min(payload["jac_init"]))
         if key == "n_neg_init" and "jac_init" in payload:
-            return int(np.sum(np.asarray(payload["jac_init"]) <= 0))
+            return int(np.sum(payload["jac_init"] <= 0))
         return None
 
     include_method = False

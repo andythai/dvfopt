@@ -6,13 +6,13 @@ from pathlib import Path
 import numpy as np
 
 
-BENCHMARK_UTILS_PATH = (
+benchmark_utils_path = (
     Path(__file__).resolve().parents[1] / "benchmarks" / "benchmark_utils.py"
 )
-SPEC = spec_from_file_location("benchmark_utils", BENCHMARK_UTILS_PATH)
-benchmark_utils = module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(benchmark_utils)
+spec = spec_from_file_location("benchmark_utils", benchmark_utils_path)
+benchmark_utils = module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(benchmark_utils)
 
 
 def test_results_to_rows_keeps_flat_results_shape():
