@@ -22,8 +22,8 @@ Two input modes are supported by each notebook:
 ## Notebooks
 
 ### [correct-3d-slices.ipynb](correct-3d-slices.ipynb)
-Baseline version using the default serial iterative SLSQP with the
-Jacobian-only constraint.
+Default version using `iterative_parallel` with the Jacobian-only
+constraint.
 
 ### [correct-3d-slices-serial.ipynb](correct-3d-slices-serial.ipynb)
 Explicit serial variant — exercises `iterative_serial` on every
