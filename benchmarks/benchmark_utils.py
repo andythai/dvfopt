@@ -76,11 +76,15 @@ def save_results_csv(rows, columns, output_dir, name="results"):
     """
     path = Path(output_dir) / f"{name}.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=columns) if isinstance(rows[0], dict) else csv.writer(f)
-        if isinstance(rows[0], dict):
+        if not rows:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+        elif isinstance(rows[0], dict):
+            writer = csv.DictWriter(f, fieldnames=columns)
             writer.writeheader()
             writer.writerows(rows)
         else:
+            writer = csv.writer(f)
             writer.writerow(columns)
             writer.writerows(rows)
     print(f"  [saved] {path}")
