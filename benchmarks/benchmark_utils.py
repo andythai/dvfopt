@@ -234,9 +234,7 @@ def results_to_rows(results, extra_cols=None):
             return int(np.sum(np.asarray(payload["jac_init"]) <= 0))
         return None
 
-    rows = []
     include_method = False
-    columns = base_cols + extra
     rows = []
     for label, r in results.items():
         nested = {
@@ -264,8 +262,7 @@ def results_to_rows(results, extra_cols=None):
             row[c] = _round_if_float(_get_value(r, c))
         rows.append(row)
 
-    if include_method:
-        columns = ["case", "method"] + base_cols[1:] + extra
+    columns = ["case", "method"] + base_cols[1:] + extra if include_method else base_cols + extra
     return rows, columns
 
 
