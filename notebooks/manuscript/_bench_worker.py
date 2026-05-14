@@ -420,6 +420,181 @@ def _make_2tri_jac_2d(phi_win, interior_mask):
     return jac
 
 
+def solve_cluster_inline(c, phi_win, phi_anchor_win,
+                          threshold, eps,
+                          l2_max_passes, l2_max_iter, l1_max_iter):
+    """All-in-one 2D cluster solver: notebook-18-style multi-pass L2
+    SLSQP + L1 polish, fully inline (no subprocess). Designed for use
+    inside a ``concurrent.futures.ProcessPoolExecutor`` worker.
+
+    Returns ``(cluster_row_dict, phi_l1_or_None)``. ``phi_l1`` has
+    the same shape as ``phi_win``; the caller should splice **only the
+    interior_mask corners** back into the global slice to avoid
+    overwriting other clusters' edits in parallel mode.
+    """
+    import time as _time
+    from dvfopt.jacobian.triangle_sign import _triangle_areas_2d as _tri
+
+    t0 = _time.time()
+    interior_mask = c['interior_mask']
+    row = {
+        'z': c.get('z', -1),
+        'cluster_id': c.get('cluster_id', -1),
+        'y0': c['y0'], 'y1': c['y1'], 'x0': c['x0'], 'x1': c['x1'],
+        'crop_cells_y': c['crop_cells_y'],
+        'crop_cells_x': c['crop_cells_x'],
+        'component_cells': c['component_cells'],
+        'skipped_too_large': c['skipped_too_large'],
+    }
+    if c['skipped_too_large']:
+        row.update({'cluster_t': _time.time() - t0, 'feasible': False})
+        return row, None
+
+    T1, T2 = _tri(phi_win[0], phi_win[1])
+    init_n_neg = int((T1 <= 0).sum() + (T2 <= 0).sum())
+    init_min_tri = float(min(T1.min(), T2.min()))
+    row.update({'init_n_neg_tri': init_n_neg, 'init_min_tri': init_min_tri})
+
+    if init_n_neg == 0:
+        row.update({
+            'after_l2_n_neg_tri': 0, 'after_l2_min_tri': init_min_tri,
+            'after_l1_n_neg_tri': 0, 'after_l1_min_tri': init_min_tri,
+            'l2_passes_run': 0, 'l2_total_nit': 0, 'l2_total_t': 0.0,
+            'l2_any_timeout': False,
+            'l1_nit': 0, 'l1_t': 0.0,
+            'l1_polished': False, 'l1_timed_out': False,
+            'cluster_t': _time.time() - t0, 'feasible': True,
+        })
+        return row, None
+
+    pack, unpack, n_int = _interior_pack_unpack_2d(phi_win, interior_mask)
+    if n_int == 0:
+        # No movable corners -> can't fix anything.
+        row.update({
+            'after_l2_n_neg_tri': init_n_neg, 'after_l2_min_tri': init_min_tri,
+            'after_l1_n_neg_tri': init_n_neg, 'after_l1_min_tri': init_min_tri,
+            'l2_passes_run': 0, 'l2_total_nit': 0, 'l2_total_t': 0.0,
+            'l2_any_timeout': False,
+            'l1_nit': 0, 'l1_t': 0.0,
+            'l1_polished': False, 'l1_timed_out': False,
+            'cluster_t': _time.time() - t0, 'feasible': False,
+        })
+        return row, None
+
+    z_anchor = pack(phi_anchor_win)
+
+    def obj_l2(z):
+        d = z - z_anchor
+        return 0.5 * float(np.dot(d, d)), d
+
+    def constr(z):
+        phi = unpack(z, phi_win)
+        T1, T2 = _tri(phi[0], phi[1])
+        return np.concatenate([T1.flatten(), T2.flatten()])
+
+    jac_func = _make_2tri_jac_2d(phi_win, interior_mask)
+    nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf, jac=jac_func)
+
+    # --- L2 multi-pass with perturb-on-stall ----------------------------
+    # Each pass: SLSQP from the current iterate. If a pass leaves n_neg
+    # unchanged (SLSQP succeeded but found no actual improvement, or
+    # hit a fixed point), perturb the iterate before the next pass so
+    # SLSQP has a different starting point. After STALL_PERTURB_LIMIT
+    # consecutive non-improving passes, give up.
+    STALL_PERTURB_LIMIT = 3
+    phi_work = phi_win.copy()
+    l2_total_nit = 0
+    l2_total_t = 0.0
+    l2_passes_run = 0
+    last_n_neg = init_n_neg
+    stall_count = 0
+    perturb_seed = 0
+    for pass_idx in range(l2_max_passes):
+        T1, T2 = _tri(phi_work[0], phi_work[1])
+        cur_n_neg = int((T1 <= 0).sum() + (T2 <= 0).sum())
+        if cur_n_neg == 0:
+            break
+        z_init = pack(phi_work)
+        # Perturb on stall (or first pass when z == anchor); helps SLSQP
+        # escape fixed points.
+        if pass_idx == 0:
+            z_init = _seed_perturb(z_init, z_anchor)
+        elif stall_count > 0:
+            rng = np.random.default_rng(101 + perturb_seed)
+            sigma = 0.005 * stall_count   # escalating perturbation
+            z_init = z_init + rng.normal(scale=sigma, size=z_init.shape)
+            perturb_seed += 1
+        t_pass = _time.time()
+        res = minimize(obj_l2, z_init, jac=True, method='SLSQP',
+                        constraints=[nl],
+                        options={'maxiter': l2_max_iter, 'disp': False})
+        l2_total_t += _time.time() - t_pass
+        l2_passes_run += 1
+        phi_new = unpack(res.x, phi_work)
+        T1_new, T2_new = _tri(phi_new[0], phi_new[1])
+        new_n_neg = int((T1_new <= 0).sum() + (T2_new <= 0).sum())
+        # Accept only if STRICTLY better than current state. Otherwise
+        # revert and bump stall counter (next pass will perturb harder).
+        if new_n_neg < cur_n_neg:
+            phi_work = phi_new
+            l2_total_nit += int(res.nit)
+            last_n_neg = new_n_neg
+            stall_count = 0
+        else:
+            stall_count += 1
+            if stall_count >= STALL_PERTURB_LIMIT:
+                break
+
+    T1, T2 = _tri(phi_work[0], phi_work[1])
+    after_l2_n_neg = int((T1 <= 0).sum() + (T2 <= 0).sum())
+    after_l2_min = float(min(T1.min(), T2.min()))
+
+    # --- L1 polish (only if L2 reached feasibility) -----------------
+    l1_nit = 0
+    l1_t = 0.0
+    l1_polished = False
+    after_l1_n_neg = after_l2_n_neg
+    after_l1_min = after_l2_min
+    phi_l1 = phi_work
+    if after_l2_n_neg == 0:
+        z_init = pack(phi_work)
+
+        def obj_l1(z):
+            d = z - z_anchor
+            s = np.sqrt(d * d + eps * eps)
+            return float(s.sum()), d / s
+
+        t_pass = _time.time()
+        res = minimize(obj_l1, z_init, jac=True, method='SLSQP',
+                        constraints=[nl],
+                        options={'maxiter': l1_max_iter, 'ftol': 1e-9,
+                                 'disp': False})
+        l1_t = _time.time() - t_pass
+        l1_nit = int(res.nit)
+        phi_candidate = unpack(res.x, phi_work)
+        T1c, T2c = _tri(phi_candidate[0], phi_candidate[1])
+        n_neg_c = int((T1c <= 0).sum() + (T2c <= 0).sum())
+        L1_l2 = float(np.abs(phi_work - phi_anchor_win).sum())
+        L1_c = float(np.abs(phi_candidate - phi_anchor_win).sum())
+        if n_neg_c == 0 and L1_c < L1_l2 - 1e-9:
+            phi_l1 = phi_candidate
+            after_l1_n_neg = n_neg_c
+            after_l1_min = float(min(T1c.min(), T2c.min()))
+            l1_polished = True
+
+    row.update({
+        'after_l2_n_neg_tri': after_l2_n_neg, 'after_l2_min_tri': after_l2_min,
+        'l2_passes_run': l2_passes_run, 'l2_total_nit': l2_total_nit,
+        'l2_total_t': l2_total_t, 'l2_any_timeout': False,
+        'after_l1_n_neg_tri': after_l1_n_neg, 'after_l1_min_tri': after_l1_min,
+        'l1_nit': l1_nit, 'l1_t': l1_t,
+        'l1_polished': l1_polished, 'l1_timed_out': False,
+        'cluster_t': _time.time() - t0,
+        'feasible': bool(after_l1_n_neg == 0),
+    })
+    return row, phi_l1
+
+
 def _seed_perturb(z_init, z_anchor, sigma=1e-3, seed=42):
     """If z_init is exactly z_anchor, add a tiny Gaussian perturbation so
     SLSQP starts off the objective's zero-gradient point. Notebook-14

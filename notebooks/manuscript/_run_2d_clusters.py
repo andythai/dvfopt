@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutTimeout
 
 import numpy as np
 import pandas as pd
@@ -50,7 +51,11 @@ EPS_L1 = 1e-4
 #   4. interior_mask = voxel corners adjacent to any cell in the
 #      dilated component. Slice-edge corners are naturally movable
 #      (no outside cell to constrain).
-MERGE_DILATION = 1
+MERGE_DILATION = 2  # MERGE=2 + rectangular interior_mask achieves 178->0
+                    # on z=126 in 7.8s (vs 178->13 with MERGE=1 + component-
+                    # shaped mask). Wider movable region gives SLSQP enough
+                    # degrees of freedom to fix severe folds; merging
+                    # adjacent fold regions ensures they solve together.
 BBOX_PAD = 1
 MAX_CLUSTER_CELLS = 2000         # crops above this are skipped (over SLSQP cap)
 MAX_CLUSTER_PER_AXIS = 60
@@ -68,6 +73,16 @@ L1_POLISH_MAX_ITER = 120
 L1_POLISH_TIMEOUT_S = 60
 
 CHECKPOINT_EVERY = 5             # checkpoint every N slices
+
+# --- Parallel cluster execution ----------------------------------------
+# Pool of long-lived workers means each cluster pays no fresh-spawn cost.
+# Clusters are batched into "rounds" where no two clusters' bboxes overlap,
+# so parallel solves don't write each other's boundary corners. After each
+# round, only the *interior_mask* corners are spliced back into phi_slice
+# so frozen-edge corners (which the solver assumed at snapshot values) stay
+# at those snapshot values.
+N_PARALLEL_WORKERS = max(1, (os.cpu_count() or 4) - 2)
+PER_CLUSTER_TIMEOUT_S = 60       # passed to ``future.result(timeout=...)``
 
 OUTPUT_DIR = os.path.join(_HERE, 'output', '2d_real_full')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -235,11 +250,15 @@ def enumerate_clusters_2d(phi_slice, max_axis, max_cells):
         y0 = max(0, cy0 - BBOX_PAD); y1 = min(Hc, cy1 + BBOX_PAD)
         x0 = max(0, cx0 - BBOX_PAD); x1 = min(Wc, cx1 + BBOX_PAD)
         sy = y1 - y0; sx = x1 - x0
-        # Movable corners = those adjacent to any cell in the (merged)
-        # cluster mask. Everything else stays frozen at its current
-        # value.
+        # Rectangular interior_mask -- every corner inside the bbox is
+        # movable, only the outer 1-corner ring is frozen. Empirically
+        # this wins over the tighter component-shaped mask: SLSQP needs
+        # the extra degrees of freedom to fix severe folds even though
+        # the component-shaped mask is technically a subset of these.
+        interior_mask = np.zeros((sy + 1, sx + 1), dtype=bool)
+        if sy + 1 > 2 and sx + 1 > 2:
+            interior_mask[1:-1, 1:-1] = True
         cluster_in_bbox = (labels[y0:y1, x0:x1] == cid)
-        interior_mask = _component_corner_mask(cluster_in_bbox, sy, sx)
         # Number of *fold* cells in this cluster (vs. dilated/merge
         # halo cells) -- this is what gets reported.
         comp_cells = int((cluster_in_bbox & cell_fold_mask[y0:y1, x0:x1]).sum())
@@ -375,7 +394,53 @@ def solve_one_cluster(c, phi_slice, phi_anchor_slice, z):
     return row, phi_l1
 
 
-def process_one_slice(z, phi_full, phi_anchor_full):
+def _partition_clusters_nonoverlapping(clusters):
+    """Greedy graph-colour: pack clusters into rounds where no two
+    clusters in the same round have *adjacent or overlapping* bboxes.
+
+    Two clusters are "conflicting" if their bboxes touch even at a
+    boundary corner -- bbox A's bottom row of voxel corners is shared
+    with bbox B's top row when their cell ranges are A:[y0,y1), B:[y1,y2).
+    If A's interior_mask reaches that boundary corner and B's does too,
+    parallel solves write the same corner with different values and one
+    overwrites the other. Requiring a 1-cell gap (strict ``y1 < c2.y0``)
+    guarantees disjoint voxel-corner grids.
+    """
+    rounds = []
+    for c in clusters:
+        y0, y1, x0, x1 = c['y0'], c['y1'], c['x0'], c['x1']
+        placed = False
+        for r in rounds:
+            ok = True
+            for c2 in r:
+                # Disjoint (with 1-cell gap) iff one ends strictly before
+                # the other starts in at least one axis.
+                if not (y1 < c2['y0'] or c2['y1'] < y0
+                        or x1 < c2['x0'] or c2['x1'] < x0):
+                    ok = False
+                    break
+            if ok:
+                r.append(c)
+                placed = True
+                break
+        if not placed:
+            rounds.append([c])
+    return rounds
+
+
+def _splice_interior(phi_slice, c, phi_l1):
+    """Write back only the interior_mask corners (skip frozen edges).
+    Safe even if another cluster's bbox shares cells with c's bbox.
+    """
+    y0, y1 = c['y0'], c['y1']
+    x0, x1 = c['x0'], c['x1']
+    mask = c['interior_mask']  # shape (y1-y0+1, x1-x0+1)
+    iy, ix = np.where(mask)
+    phi_slice[0, y0 + iy, x0 + ix] = phi_l1[0, iy, ix]
+    phi_slice[1, y0 + iy, x0 + ix] = phi_l1[1, iy, ix]
+
+
+def process_one_slice(z, phi_full, phi_anchor_full, executor=None):
     """Run all clusters in slice z. Returns (slice_row, cluster_rows, phi_slice_new).
 
     phi_full is mutable. If the slice has no folds, phi_slice_new is None.
@@ -429,46 +494,75 @@ def process_one_slice(z, phi_full, phi_anchor_full):
             break
         total_clusters += len(clusters)
         any_processed_this_pass = False
-        for ci, c in enumerate(clusters):
+        rounds = _partition_clusters_nonoverlapping(clusters)
+        processed_in_outer = 0
+        for r_idx, round_clusters in enumerate(rounds):
             if time.time() - t_slice_start > MAX_SLICE_TIME_S:
                 break
-            crow, phi_l1 = solve_one_cluster(c, phi_slice, phi_anchor_slice, z)
-            crow['cluster_outer_it'] = outer_it
-            cluster_rows.append(crow)
-            if c['skipped_too_large']:
-                n_skipped += 1
-                continue
-            n_processed += 1
-            any_processed_this_pass = True
-            if crow.get('l2_any_timeout'):
-                n_l2_timeout += 1
-            if crow.get('feasible'):
-                n_feasible += 1
-            total_l2_t += crow.get('l2_total_t', 0.0)
-            total_l1_t += crow.get('l1_t', 0.0)
-            if phi_l1 is not None:
+            # Submit all clusters in this round to the pool (parallel).
+            futures = []
+            for c in round_clusters:
                 y0, y1 = c['y0'], c['y1']
                 x0, x1 = c['x0'], c['x1']
                 vy = slice(y0, y1 + 1); vx = slice(x0, x1 + 1)
-                phi_slice[:, vy, vx] = phi_l1
-            # Heartbeat every 25 clusters so the user can see progress
-            # within a long-running slice.
-            if (ci + 1) % 25 == 0:
-                T1_now, T2_now = _triangle_areas_2d(phi_slice[0], phi_slice[1])
-                n_now = int((T1_now <= 0).sum() + (T2_now <= 0).sum())
-                log_line(f'    [z={z} outer={outer_it} c={ci+1}/{len(clusters)}]  '
-                          f'n_neg={n_now}  feas_so_far={n_feasible} '
-                          f'skip={n_skipped} to={n_l2_timeout}  '
-                          f'elapsed_in_slice={time.time()-t_slice_start:.0f}s')
+                phi_win = phi_slice[:, vy, vx].copy()
+                phi_anchor_win = phi_anchor_slice[:, vy, vx].copy()
+                c_with_z = dict(c)
+                c_with_z['z'] = int(z)
+                fut = executor.submit(
+                    _bench_worker.solve_cluster_inline,
+                    c_with_z, phi_win, phi_anchor_win,
+                    THRESHOLD, EPS_L1,
+                    L2_MAX_PASSES, L2_PASS_MAX_ITER, L1_POLISH_MAX_ITER,
+                )
+                futures.append((fut, c))
+            # Collect this round's results -- splice each into phi_slice
+            # via interior_mask so frozen edges aren't clobbered.
+            for fut, c in futures:
+                try:
+                    crow, phi_l1 = fut.result(timeout=PER_CLUSTER_TIMEOUT_S)
+                except FutTimeout:
+                    crow = {
+                        'z': int(z), 'cluster_id': c.get('cluster_id', -1),
+                        'y0': c['y0'], 'y1': c['y1'],
+                        'x0': c['x0'], 'x1': c['x1'],
+                        'crop_cells_y': c['crop_cells_y'],
+                        'crop_cells_x': c['crop_cells_x'],
+                        'component_cells': c['component_cells'],
+                        'skipped_too_large': False,
+                        'l2_any_timeout': True,
+                        'feasible': False, 'cluster_t': PER_CLUSTER_TIMEOUT_S,
+                    }
+                    phi_l1 = None
+                crow['cluster_outer_it'] = outer_it
+                cluster_rows.append(crow)
+                if c['skipped_too_large']:
+                    n_skipped += 1
+                    continue
+                n_processed += 1
+                processed_in_outer += 1
+                any_processed_this_pass = True
+                if crow.get('l2_any_timeout'):
+                    n_l2_timeout += 1
+                if crow.get('feasible'):
+                    n_feasible += 1
+                total_l2_t += float(crow.get('l2_total_t', 0.0) or 0.0)
+                total_l1_t += float(crow.get('l1_t', 0.0) or 0.0)
+                if phi_l1 is not None:
+                    _splice_interior(phi_slice, c, phi_l1)
+            # Heartbeat at the end of each round so the user sees progress.
+            T1_now, T2_now = _triangle_areas_2d(phi_slice[0], phi_slice[1])
+            n_now = int((T1_now <= 0).sum() + (T2_now <= 0).sum())
+            log_line(f'    [z={z} outer={outer_it} round={r_idx+1}/{len(rounds)}]  '
+                      f'+{len(round_clusters)} clusters | n_neg={n_now}  '
+                      f'feas_so_far={n_feasible} skip={n_skipped} to={n_l2_timeout}  '
+                      f'elapsed={time.time()-t_slice_start:.0f}s')
         # Continue iterating until n_neg=0 or MAX_CLUSTER_OUTER_ITERS.
-        # Don't bail on a plateau: a non-improving iter often shuffles
-        # cluster boundaries enough that the next iter clears residuals.
         T1_now, T2_now = _triangle_areas_2d(phi_slice[0], phi_slice[1])
         n_neg_now = int((T1_now <= 0).sum() + (T2_now <= 0).sum())
         if n_neg_now == 0:
             break
         if not any_processed_this_pass:
-            # Nothing left to try -- all remaining clusters skipped/too-large.
             break
         prev_n_neg = n_neg_now
     T1_f, T2_f = _triangle_areas_2d(phi_slice[0], phi_slice[1])
@@ -521,42 +615,47 @@ def main():
     z_order = np.argsort(init_folds)  # ascending: easiest first
     log_line(f'pre-scan: {time.time()-t_scan:.1f}s  fold range [{init_folds.min()}..{init_folds.max()}]')
     t_run = time.time()
-    for z_int in z_order:
-        z = int(z_int)
-        if z in done:
-            continue
-        try:
-            slice_row, cluster_rows, phi_slice_new = process_one_slice(
-                z, corrected, phi_anchor)
-        except Exception as exc:
-            import traceback
-            tb = traceback.format_exc(limit=4).replace('\n', ' | ')
-            log_line(f'[ERR] z={z}  {type(exc).__name__}: {exc} :: {tb}')
-            continue
-        if phi_slice_new is not None:
-            corrected[1, z] = phi_slice_new[0]
-            corrected[2, z] = phi_slice_new[1]
-        append_row(SLICE_CSV_PATH, SLICE_COLUMNS, slice_row)
-        for crow in cluster_rows:
-            append_row(CLUSTER_CSV_PATH, CLUSTER_COLUMNS, crow)
-        done.add(z)
-        log_line(
-            f'[slice] z={z:>4d}  init={slice_row["init_n_neg_tri"]:>5d}  '
-            f'final={slice_row["after_l1_n_neg_tri"]:>5d}  '
-            f'min_tri={slice_row["after_l1_min_tri"]:+.4f}  '
-            f'L1={slice_row["after_l1_L1"]:>8.3f} '
-            f'(drop {slice_row["l1_drop_pct"]:>5.1f}%)  '
-            f'clusters={slice_row["n_clusters"]}('
-            f'feas={slice_row["n_clusters_feasible"]} '
-            f'skip={slice_row["n_clusters_skipped"]} '
-            f'to={slice_row["n_clusters_l2_timeout"]})  '
-            f'L2_t={slice_row["total_l2_t"]:>5.1f}s '
-            f'L1_t={slice_row["total_l1_t"]:>5.1f}s  '
-            f'feas={slice_row["feasible"]}  '
-            f'elapsed={time.time()-t_run:.0f}s')
-        if len(done) % CHECKPOINT_EVERY == 0:
-            save_checkpoint(corrected)
-            log_line(f'[ckpt] saved, done={len(done)}/{D}')
+    log_line(f'parallel executor: {N_PARALLEL_WORKERS} workers')
+    # One long-lived ProcessPoolExecutor for the whole run -- spawn cost
+    # is paid once at startup instead of per cluster.
+    ctx = mp.get_context('spawn')
+    with ProcessPoolExecutor(max_workers=N_PARALLEL_WORKERS, mp_context=ctx) as executor:
+        for z_int in z_order:
+            z = int(z_int)
+            if z in done:
+                continue
+            try:
+                slice_row, cluster_rows, phi_slice_new = process_one_slice(
+                    z, corrected, phi_anchor, executor=executor)
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc(limit=4).replace('\n', ' | ')
+                log_line(f'[ERR] z={z}  {type(exc).__name__}: {exc} :: {tb}')
+                continue
+            if phi_slice_new is not None:
+                corrected[1, z] = phi_slice_new[0]
+                corrected[2, z] = phi_slice_new[1]
+            append_row(SLICE_CSV_PATH, SLICE_COLUMNS, slice_row)
+            for crow in cluster_rows:
+                append_row(CLUSTER_CSV_PATH, CLUSTER_COLUMNS, crow)
+            done.add(z)
+            log_line(
+                f'[slice] z={z:>4d}  init={slice_row["init_n_neg_tri"]:>5d}  '
+                f'final={slice_row["after_l1_n_neg_tri"]:>5d}  '
+                f'min_tri={slice_row["after_l1_min_tri"]:+.4f}  '
+                f'L1={slice_row["after_l1_L1"]:>8.3f} '
+                f'(drop {slice_row["l1_drop_pct"]:>5.1f}%)  '
+                f'clusters={slice_row["n_clusters"]}('
+                f'feas={slice_row["n_clusters_feasible"]} '
+                f'skip={slice_row["n_clusters_skipped"]} '
+                f'to={slice_row["n_clusters_l2_timeout"]})  '
+                f'L2_t={slice_row["total_l2_t"]:>5.1f}s '
+                f'L1_t={slice_row["total_l1_t"]:>5.1f}s  '
+                f'feas={slice_row["feasible"]}  '
+                f'elapsed={time.time()-t_run:.0f}s')
+            if len(done) % CHECKPOINT_EVERY == 0:
+                save_checkpoint(corrected)
+                log_line(f'[ckpt] saved, done={len(done)}/{D}')
     save_checkpoint(corrected)
     log_line(f'[end] {time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}  '
               f'done={len(done)}/{D}  elapsed={time.time()-t_run:.0f}s')
