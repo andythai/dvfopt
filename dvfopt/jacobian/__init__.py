@@ -13,6 +13,20 @@ from dvfopt.jacobian.shoelace import (
     _shoelace_areas_2d,
     shoelace_det2D,
     shoelace_constraint,
+    _triangulated_shoelace_areas_2d,
+    triangulated_shoelace_det2D,
+    triangulated_shoelace_constraint,
+    _all_triangle_areas_2d,
+    triangle_det2D,
+    triangle_constraint,
+)
+from dvfopt.jacobian.triangle_sign import (
+    _triangle_areas_2d,
+    _triangle_signs_2d,
+    triangle_sign_det2D,
+    triangle_sign_count_negatives,
+    triangle_sign_areas2D,
+    triangle_sign_constraint,
 )
 from dvfopt.jacobian.monotonicity import (
     _monotonicity_diffs_2d,
@@ -20,6 +34,11 @@ from dvfopt.jacobian.monotonicity import (
     injectivity_constraint,
 )
 from dvfopt.jacobian.intersection import has_quad_self_intersections
+from dvfopt.jacobian.injectivity_radius import (
+    ift_radius_2d,
+    cell_min_jdet_2d,
+    cell_to_pixel_min,
+)
 
 __all__ = [
     "jacobian_det2D",
@@ -27,6 +46,17 @@ __all__ = [
     "sitk_jacobian_determinant",
     "shoelace_det2D",
     "shoelace_constraint",
+    "triangulated_shoelace_det2D",
+    "triangulated_shoelace_constraint",
+    "triangle_det2D",
+    "triangle_constraint",
+    "triangle_sign_det2D",
+    "triangle_sign_count_negatives",
+    "triangle_sign_areas2D",
+    "triangle_sign_constraint",
     "injectivity_constraint",
     "has_quad_self_intersections",
+    "ift_radius_2d",
+    "cell_min_jdet_2d",
+    "cell_to_pixel_min",
 ]

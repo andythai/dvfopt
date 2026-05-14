@@ -36,14 +36,57 @@ def argmin_worst_voxel(jacobian_matrix):
     return np.unravel_index(flat_index, jacobian_matrix.shape)
 
 
+def _clamp_to_voxel_budget(size, max_voxels, min_size=(3, 3, 3)):
+    """Shrink a sub-volume (sz, sy, sx) so sz*sy*sx <= max_voxels.
+
+    Scales all three dims by the same factor to preserve aspect ratio, then
+    iteratively trims the longest dim if the floored product still exceeds
+    the budget (happens when a small dim hit the ``min_size`` floor). Each
+    dim stays >= the corresponding ``min_size`` entry.
+
+    SLSQP's active-set QP cost grows as ``O((3V + V)^2)`` where V = window
+    voxels, so capping V (not per-axis dims) captures the actual cliff.
+    A cube-shaped ``max_window=(7,7,7)`` rejects a perfectly safe elongated
+    ``(3,3,39)`` window that has the same voxel count; this helper accepts it.
+    """
+    sz, sy, sx = _unpack_size_3d(size)
+    mz, my, mx = _unpack_size_3d(min_size)
+    sz, sy, sx = max(sz, mz), max(sy, my), max(sx, mx)
+    if max_voxels is None:
+        return (sz, sy, sx)
+    v = sz * sy * sx
+    if v <= max_voxels:
+        return (sz, sy, sx)
+
+    f = (max_voxels / v) ** (1.0 / 3.0)
+    nz = max(mz, int(sz * f))
+    ny = max(my, int(sy * f))
+    nx = max(mx, int(sx * f))
+    # Min-size floor can push product above budget when one axis was tiny.
+    # Trim the longest dim one at a time until feasible.
+    while nz * ny * nx > max_voxels:
+        if nz >= ny and nz >= nx and nz > mz:
+            nz -= 1
+        elif ny >= nx and ny > my:
+            ny -= 1
+        elif nx > mx:
+            nx -= 1
+        else:
+            break
+    return (nz, ny, nx)
+
+
 def neg_jdet_bounding_window_3d(jacobian_matrix, center_zyx, threshold, err_tol,
-                                labeled_array=None):
+                                labeled_array=None, pad=2):
     """Compute the smallest sub-volume enclosing the negative-Jdet region.
 
     The sub-volume is the bounding box of all voxels with
     Jdet <= *threshold* - *err_tol* that are **connected**
-    (26-connectivity) to *center_zyx*, expanded by 1 voxel on each
+    (26-connectivity) to *center_zyx*, expanded by *pad* voxels on each
     side.  Each dimension is at least 3.
+
+    The default ``pad=2`` provides 1 voxel of optimisation room around
+    the negative region plus 1 voxel for the frozen boundary ring.
 
     Returns
     -------
@@ -63,12 +106,12 @@ def neg_jdet_bounding_window_3d(jacobian_matrix, center_zyx, threshold, err_tol,
     region_zs, region_ys, region_xs = np.where(labeled_array == region_label)
 
     D, H, W = jacobian_matrix.shape
-    z_min = max(int(region_zs.min()) - 1, 0)
-    z_max = min(int(region_zs.max()) + 1, D - 1)
-    y_min = max(int(region_ys.min()) - 1, 0)
-    y_max = min(int(region_ys.max()) + 1, H - 1)
-    x_min = max(int(region_xs.min()) - 1, 0)
-    x_max = min(int(region_xs.max()) + 1, W - 1)
+    z_min = max(int(region_zs.min()) - pad, 0)
+    z_max = min(int(region_zs.max()) + pad, D - 1)
+    y_min = max(int(region_ys.min()) - pad, 0)
+    y_max = min(int(region_ys.max()) + pad, H - 1)
+    x_min = max(int(region_xs.min()) - pad, 0)
+    x_max = min(int(region_xs.max()) + pad, W - 1)
 
     depth  = max(z_max - z_min + 1, 3)
     height = max(y_max - y_min + 1, 3)
@@ -110,6 +153,7 @@ def _frozen_boundary_mask_3d(cz, cy, cx, subvolume_size, volume_shape):
     if end_x < W - 1:
         mask[:, :, -1] = True
     return mask
+
 
 
 def _frozen_edges_clean_3d(jacobian_matrix, cz, cy, cx, subvolume_size,

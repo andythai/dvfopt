@@ -47,6 +47,8 @@ from dvfopt.jacobian import (
     sitk_jacobian_determinant,
     shoelace_det2D,
     shoelace_constraint,
+    triangle_det2D,
+    triangle_constraint,
     injectivity_constraint,
 )
 

@@ -35,6 +35,7 @@ def iterative_serial(
     enforce_shoelace=False,
     enforce_injectivity=False,
     injectivity_threshold=None,
+    enforce_triangles=False,
     max_doublings=5,
     debug=None,
 ):
@@ -78,6 +79,12 @@ def iterative_serial(
         forces greater vertex separation in deformed space, preventing
         distant cells from overlapping under large shear.  Recommended
         range: ``0.05`` – ``0.3`` when ``enforce_injectivity=True``.
+    enforce_triangles : bool
+        When ``True``, adds a constraint requiring all 4 signed triangle
+        areas per cell (both diagonal splits) to exceed *threshold* — the
+        strict PL-bijectivity condition.  Stricter than ``enforce_shoelace``
+        (which checks the sum along one diagonal) at the cost of 4x
+        constraint rows per cell.
     max_doublings : int
         Maximum number of tau doublings in the adaptive injectivity loop
         (only used when ``enforce_injectivity=True`` and
@@ -124,6 +131,7 @@ def iterative_serial(
             max_minimize_iter=max_minimize_iter,
             enforce_shoelace=enforce_shoelace,
             enforce_injectivity=enforce_injectivity,
+            enforce_triangles=enforce_triangles,
             debug=debug,
         )
 
@@ -141,7 +149,8 @@ def iterative_serial(
     # Initial Jacobian
     jacobian_matrix, quality_matrix, init_neg, init_min = _update_metrics(
         phi, phi_init, enforce_shoelace, enforce_injectivity,
-        num_neg_jac, min_jdet_list)
+        num_neg_jac, min_jdet_list,
+        enforce_triangles=enforce_triangles)
 
     _log(verbose, 1, f"[init] Neg-Jdet pixels: {init_neg}  |  min Jdet: {init_min:.6f}")
 
@@ -155,6 +164,17 @@ def iterative_serial(
     consecutive_improving = 0
     _STALL_THRESHOLD = 3     # escalate after this many consecutive stalls on same pixel
     _DE_ESCALATE_AFTER = 5   # de-escalate after this many consecutive improving iterations
+
+    # Oscillation-livelock guard: per-pixel stall_counts reset on any
+    # neg-count drop, so alternating between two pixels (e.g. neg 1->2->1->2)
+    # never hits _STALL_THRESHOLD for either index even though the global
+    # neg count hasn't actually improved in many iters. Track iters since a
+    # new *best* (min-so-far) neg-count and escalate global_min_window when
+    # that plateaus — forces windows big enough to cover both oscillating
+    # pixels in a single SLSQP call.
+    best_neg_seen = init_neg
+    iters_since_best = 0
+    _OSCILLATION_STALL = 4   # escalate when no new best for this many iters
 
     while iteration < max_iterations and (quality_matrix[0] <= threshold - err_tol).any():
         iteration += 1
@@ -200,6 +220,7 @@ def iterative_serial(
                 enforce_shoelace=enforce_shoelace,
                 enforce_injectivity=enforce_injectivity,
                 injectivity_threshold=injectivity_threshold,
+                enforce_triangles=enforce_triangles,
                 plot_callback=_cb,
                 deformation_i=deformation_i,
                 min_window=global_min_window,
@@ -231,6 +252,22 @@ def iterative_serial(
                 consecutive_improving = 0
                 _log(verbose, 1, "  [de-escalate] consistent improvement, min window -> 3x3")
         prev_neg = cur_neg
+
+        # Oscillation-livelock escalation (orthogonal to per-pixel stall).
+        # Uses "iters since new best" rather than "consecutive stall" so it
+        # triggers on 1->2->1->2 patterns the per-pixel counter misses.
+        if cur_neg < best_neg_seen:
+            best_neg_seen = cur_neg
+            iters_since_best = 0
+        else:
+            iters_since_best += 1
+            gsy2, gsx2 = global_min_window  # re-snapshot (per-pixel branch may have mutated)
+            if iters_since_best >= _OSCILLATION_STALL and (gsy2 < H or gsx2 < W):
+                global_min_window = (min(gsy2 + 2, H), min(gsx2 + 2, W))
+                iters_since_best = 0
+                _log(verbose, 1,
+                     f"  [escalate-osc] no new best for {_OSCILLATION_STALL} iters, "
+                     f"min window -> {global_min_window[0]}x{global_min_window[1]}")
 
         # Side-by-side before/after snapshot for this iteration.
         if _show_snap:

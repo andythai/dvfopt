@@ -10,6 +10,8 @@ from dvfopt.jacobian.shoelace import (
     _shoelace_areas_2d,
     shoelace_det2D,
     shoelace_constraint,
+    _all_triangle_areas_2d,
+    triangle_constraint,
 )
 from dvfopt.jacobian.monotonicity import (
     _monotonicity_diffs_2d,
@@ -19,6 +21,7 @@ from dvfopt.jacobian.monotonicity import (
 from dvfopt.core.slsqp.gradients import (
     jdet_constraint_jacobian_2d,
     shoelace_constraint_jacobian_2d,
+    triangle_constraint_jacobian_2d,
     injectivity_constraint_jacobian_2d,
 )
 
@@ -37,13 +40,14 @@ def jacobian_constraint(phi_xy, submatrix_size, exclude_boundaries=True):
 
 
 def _quality_map(phi, enforce_shoelace, enforce_injectivity=False,
+                 enforce_triangles=False,
                  jacobian_matrix=None):
     """Per-pixel quality metric combining gradient-Jdet and optional extras.
 
-    When both *enforce_shoelace* and *enforce_injectivity* are ``False``,
-    returns ``jacobian_det2D(phi)``.  Otherwise, each active metric is
-    spread to per-pixel values and the element-wise minimum is returned
-    so that the worst violation drives pixel selection and convergence.
+    When all ``enforce_*`` flags are ``False``, returns
+    ``jacobian_det2D(phi)``.  Otherwise, each active metric is spread to
+    per-pixel values and the element-wise minimum is returned so that the
+    worst violation drives pixel selection and convergence.
 
     Parameters
     ----------
@@ -53,10 +57,22 @@ def _quality_map(phi, enforce_shoelace, enforce_injectivity=False,
     Returns shape ``(1, H, W)`` — same as ``jacobian_det2D``.
     """
     jdet = jacobian_matrix if jacobian_matrix is not None else jacobian_det2D(phi)
-    if not enforce_shoelace and not enforce_injectivity:
+    if not enforce_shoelace and not enforce_injectivity and not enforce_triangles:
         return jdet
     result = jdet.copy()
     H, W = jdet.shape[1:]
+
+    if enforce_triangles:
+        # All 4 triangle areas per cell, reduce to per-cell minimum, then
+        # spread to all 4 incident vertices (same pattern as shoelace).
+        tri = _all_triangle_areas_2d(phi[0], phi[1])  # (4, H-1, W-1)
+        cell_min = tri.min(axis=0)                     # (H-1, W-1)
+        spread = np.full((1, H, W), np.inf)
+        spread[0, :-1, :-1] = np.minimum(spread[0, :-1, :-1], cell_min)
+        spread[0, :-1, 1:]  = np.minimum(spread[0, :-1, 1:],  cell_min)
+        spread[0, 1:,  :-1] = np.minimum(spread[0, 1:,  :-1], cell_min)
+        spread[0, 1:,  1:]  = np.minimum(spread[0, 1:,  1:],  cell_min)
+        result = np.minimum(result, spread)
 
     if enforce_shoelace:
         areas = shoelace_det2D(phi)           # (1, H-1, W-1)
@@ -93,7 +109,8 @@ def _quality_map(phi, enforce_shoelace, enforce_injectivity=False,
 
 def _build_constraints(phi_sub_flat, submatrix_size, is_at_edge,
                        window_reached_max, threshold, enforce_shoelace=False,
-                       enforce_injectivity=False, injectivity_threshold=None):
+                       enforce_injectivity=False, injectivity_threshold=None,
+                       enforce_triangles=False):
     """Build SLSQP constraints for a sub-window optimisation.
 
     Returns a list of constraint objects suitable for
@@ -107,6 +124,11 @@ def _build_constraints(phi_sub_flat, submatrix_size, is_at_edge,
     ``NonlinearConstraint`` enforces monotonicity of deformed coordinates
     (h, v, and anti-diagonal), which together guarantee each deformed quad
     cell is convex — a sufficient condition for preventing self-intersections.
+
+    When *enforce_triangles* is ``True``, adds a ``NonlinearConstraint``
+    requiring all 4 signed triangle areas per cell (both diagonal splits)
+    to exceed *threshold* — the strict PL-bijectivity condition.  Stricter
+    than shoelace or triangulated-shoelace.
 
     Parameters
     ----------
@@ -131,6 +153,13 @@ def _build_constraints(phi_sub_flat, submatrix_size, is_at_edge,
             lambda phi1: shoelace_constraint(phi1, submatrix_size, exclude_bounds),
             threshold, np.inf,
             jac=lambda phi1: shoelace_constraint_jacobian_2d(phi1, submatrix_size, exclude_bounds),
+        ))
+
+    if enforce_triangles:
+        constraints.append(NonlinearConstraint(
+            lambda phi1: triangle_constraint(phi1, submatrix_size, exclude_bounds),
+            threshold, np.inf,
+            jac=lambda phi1: triangle_constraint_jacobian_2d(phi1, submatrix_size, exclude_bounds),
         ))
 
     if enforce_injectivity:

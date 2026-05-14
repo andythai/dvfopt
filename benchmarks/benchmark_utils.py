@@ -1,12 +1,279 @@
-"""Shared plotting and metric utilities for benchmark notebooks."""
+"""Shared plotting, metric, and output utilities for benchmark notebooks."""
 
+import csv
+import json
+import os
 import time
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 
 from dvfopt import jacobian_det2D, jacobian_det3D
+from dvfopt._defaults import DEFAULT_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# Output directory management
+# ---------------------------------------------------------------------------
+
+def get_output_dir(method, notebook_name, base="output"):
+    """Create and return an output directory for a benchmark run.
+
+    Structure: ``output/<method>/<notebook_name>/``
+
+    Parameters
+    ----------
+    method : str
+        Solver category, e.g. ``"slsqp"``, ``"barrier"``, ``"barrier-gpu"``.
+    notebook_name : str
+        Short identifier for the notebook, e.g. ``"scalability"``.
+    base : str
+        Root output folder (relative to cwd or absolute).
+
+    Returns
+    -------
+    pathlib.Path
+    """
+    out = Path(base) / method / notebook_name
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def save_figure(fig, output_dir, name, dpi=150, close=False):
+    """Save a matplotlib figure as PNG.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+    output_dir : str or Path
+    name : str
+        Filename without extension.
+    dpi : int
+    close : bool
+        If True, close the figure after saving.
+    """
+    path = Path(output_dir) / f"{name}.png"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    print(f"  [saved] {path}")
+    if close:
+        plt.close(fig)
+
+
+def save_results_csv(rows, columns, output_dir, name="results"):
+    """Save tabular results as CSV.
+
+    Parameters
+    ----------
+    rows : list[dict] or list[list]
+        Each row is a dict (keys = column names) or a list of values.
+    columns : list[str]
+        Column headers.
+    output_dir : str or Path
+    name : str
+        Filename without extension.
+    """
+    path = Path(output_dir) / f"{name}.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        if not rows:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+        elif isinstance(rows[0], dict):
+            writer = csv.DictWriter(f, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(rows)
+        else:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            writer.writerows(rows)
+    print(f"  [saved] {path}")
+
+
+def save_summary_json(data, output_dir, name="summary"):
+    """Save a JSON summary of the benchmark run.
+
+    Parameters
+    ----------
+    data : dict
+        Arbitrary JSON-serialisable data.
+    output_dir : str or Path
+    name : str
+        Filename without extension.
+    """
+    path = Path(output_dir) / f"{name}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, default=str)
+    print(f"  [saved] {path}")
+
+
+def log_run_header(method, notebook_name, output_dir, extra=None):
+    """Print a standardised run header and return a dict for the summary.
+
+    Parameters
+    ----------
+    method : str
+    notebook_name : str
+    output_dir : Path or str
+    extra : dict, optional
+        Additional key-value pairs to include.
+
+    Returns
+    -------
+    dict  — summary skeleton (fill in results later).
+    """
+    ts = datetime.now().isoformat(timespec="seconds")
+    print("=" * 72)
+    print(f"  Benchmark  : {notebook_name}")
+    print(f"  Method     : {method}")
+    print(f"  Timestamp  : {ts}")
+    print(f"  Output dir : {output_dir}")
+    if extra:
+        for k, v in extra.items():
+            print(f"  {k:<11s}: {v}")
+    print("=" * 72)
+    return {"benchmark": notebook_name, "method": method, "timestamp": ts,
+            "output_dir": str(output_dir), **(extra or {})}
+
+
+def log_run_footer(summary, results):
+    """Print a standardised footer and return the completed summary.
+
+    Parameters
+    ----------
+    summary : dict
+        From ``log_run_header``.
+    results : dict
+        Keyed by case label; each value should have at least
+        ``n_neg_init``, ``n_neg_final``, ``min_jdet``, ``l2_err``, ``time``.
+    """
+    total_cases = len(results)
+    converged = sum(1 for r in results.values() if r.get("n_neg_final", 1) == 0)
+    total_time = sum(r.get("time", 0) for r in results.values())
+    print()
+    print("-" * 72)
+    print(f"  Cases: {total_cases}  |  Converged: {converged}/{total_cases}  "
+          f"|  Total time: {total_time:.2f}s")
+    print("-" * 72)
+    summary["total_cases"] = total_cases
+    summary["converged"] = converged
+    summary["total_time_s"] = round(total_time, 2)
+    return summary
+
+
+def show_and_save(output_dir, name=None, fig=None, dpi=150):
+    """Save the current figure as PNG and then call ``plt.show()``.
+
+    Drop-in replacement for ``plt.show()`` that also persists the figure.
+
+    Parameters
+    ----------
+    output_dir : str or Path
+        Where to save the PNG.
+    name : str, optional
+        Filename stem.  Auto-increments ``figure_01``, ``figure_02``, ...
+        if omitted.
+    fig : Figure, optional
+        Defaults to ``plt.gcf()``.
+    dpi : int
+    """
+    if fig is None:
+        fig = plt.gcf()
+    if name is None:
+        show_and_save._counter = getattr(show_and_save, "_counter", 0) + 1
+        name = f"figure_{show_and_save._counter:02d}"
+    save_figure(fig, output_dir, name, dpi=dpi)
+    plt.show()
+
+
+def reset_figure_counter():
+    """Reset the auto-increment counter used by ``show_and_save``."""
+    show_and_save._counter = 0
+
+
+def results_to_rows(results, extra_cols=None):
+    """Convert a results dict to a list of flat dicts for CSV export.
+
+    Parameters
+    ----------
+    results : dict[str, dict]
+        Keyed by label. Values must contain the standard metric keys.
+    extra_cols : list[str], optional
+        Additional keys to extract from each result dict.
+
+    Returns
+    -------
+    rows : list[dict]
+    columns : list[str]
+    """
+    base_cols = ["case", "n_neg_init", "n_neg_final", "min_jdet_init",
+                 "min_jdet", "l2_err", "time"]
+    extra = extra_cols or []
+    # Some notebooks store the standard CSV metrics under shorter keys such as
+    # ``neg`` and ``l2`` inside per-method result dicts.
+    aliases = {
+        "n_neg_final": ("n_neg_final", "neg"),
+        "l2_err": ("l2_err", "l2"),
+    }
+    # These keys identify nested method result payloads (for example
+    # ``windowed``/``fullgrid``) rather than shared metadata like ``jac_init``.
+    metric_keys = {"min_jdet", "time", "n_neg_final", "neg", "l2_err", "l2"}
+
+    def _round_if_float(value):
+        if isinstance(value, float):
+            return round(value, 6)
+        return value
+
+    def _is_method_result(payload):
+        return isinstance(payload, dict) and any(key in payload for key in metric_keys)
+
+    def _get_value(payload, key):
+        for candidate in aliases.get(key, (key,)):
+            if candidate in payload:
+                return payload[candidate]
+        if key == "min_jdet_init" and "jac_init" in payload:
+            return float(np.min(payload["jac_init"]))
+        if key == "n_neg_init" and "jac_init" in payload:
+            return int(np.sum(payload["jac_init"] < DEFAULT_PARAMS["threshold"]))
+        return None
+
+    include_method = False
+    rows = []
+    for label, r in results.items():
+        # Split method-specific result dicts from shared case-level metadata.
+        method_results = {
+            name: value
+            for name, value in r.items()
+            if _is_method_result(value)
+        }
+        if method_results:
+            include_method = True
+            # Shared metadata is copied into every per-method CSV row.
+            common_data = {
+                name: value
+                for name, value in r.items()
+                if name not in method_results
+            }
+            for method, payload in method_results.items():
+                merged = {**common_data, **payload}
+                row = {"case": label, "method": method}
+                for c in base_cols[1:] + extra:
+                    row[c] = _round_if_float(_get_value(merged, c))
+                rows.append(row)
+            continue
+
+        row = {"case": label}
+        for c in base_cols[1:] + extra:
+            row[c] = _round_if_float(_get_value(r, c))
+        rows.append(row)
+
+    columns = (
+        ["case", "method"] + base_cols[1:] + extra
+        if include_method
+        else base_cols + extra
+    )
+    return rows, columns
 
 
 # ---------------------------------------------------------------------------

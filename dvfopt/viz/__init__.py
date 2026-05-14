@@ -23,6 +23,7 @@ from dvfopt.viz.grids import (
     plot_2d_deformation_grid,
     plot_deformed_quads,
     plot_deformed_quads_colored,
+    plot_grid,
     plot_grid_before_after,
 )
 from dvfopt.viz.closeups import (
@@ -36,6 +37,11 @@ from dvfopt.viz.fields3d import (
     plot_neg_voxels_before_after,
     plot_deformation_grid_3d,
     plot_grid_before_after_3d,
+)
+from dvfopt.viz.triangle_debug import (
+    plot_triangle_debug,
+    plot_problematic_triangles,
+    find_problematic_pixels,
 )
 
 __all__ = [
@@ -52,6 +58,7 @@ __all__ = [
     "plot_2d_deformation_grid",
     "plot_deformed_quads",
     "plot_deformed_quads_colored",
+    "plot_grid",
     "plot_grid_before_after",
     "plot_checkerboard_before_after",
     "plot_neg_jdet_neighborhoods",
@@ -61,4 +68,7 @@ __all__ = [
     "plot_neg_voxels_before_after",
     "plot_deformation_grid_3d",
     "plot_grid_before_after_3d",
+    "plot_triangle_debug",
+    "plot_problematic_triangles",
+    "find_problematic_pixels",
 ]

@@ -1,5 +1,7 @@
 """Tests for dvfopt.core.solver3d — 3D solver internal helper functions."""
 
+from collections import defaultdict
+
 import numpy as np
 import pytest
 
@@ -7,6 +9,7 @@ from dvfopt.core.solver3d import (
     _init_phi_3d,
     _apply_result_3d,
     _patch_jacobian_3d,
+    _serial_fix_voxel,
     _update_metrics_3d,
 )
 from dvfopt.jacobian.numpy_jdet import jacobian_det3D
@@ -131,3 +134,89 @@ class TestUpdateMetrics3D:
 
         # Interior of patched region matches (skip sub-array boundary)
         np.testing.assert_allclose(jac[3:6, 3:6, 3:6], jac_full[3:6, 3:6, 3:6], atol=1e-12)
+
+
+class TestSerialFixVoxel3D:
+    def test_voxel_budget_blocked_growth_runs_optimizer(self, monkeypatch):
+        """A growth-blocked dirty rim must fall through to optimization."""
+        from dvfopt.core import solver3d as s3
+
+        phi = np.zeros((3, 5, 5, 5), dtype=np.float64)
+        phi_init = phi.copy()
+        jacobian_matrix = np.full((5, 5, 5), -1.0, dtype=np.float64)
+        window_counts = defaultdict(int)
+
+        clean_calls = {"count": 0}
+        optimize_calls = {"count": 0}
+
+        monkeypatch.setattr(
+            s3,
+            "neg_jdet_bounding_window_3d",
+            lambda *args, **kwargs: ((3, 3, 3), (2, 2, 2)),
+        )
+        monkeypatch.setattr(
+            s3,
+            "_clamp_to_voxel_budget",
+            lambda size, max_voxels, min_size: (3, 3, 3),
+        )
+        monkeypatch.setattr(
+            s3,
+            "_edge_flags_3d",
+            lambda *args, **kwargs: (False, False),
+        )
+        monkeypatch.setattr(
+            s3,
+            "_frozen_boundary_mask_3d",
+            lambda *args, **kwargs: np.ones((3, 3, 3), dtype=bool),
+        )
+
+        def dirty_rim(*args, **kwargs):
+            clean_calls["count"] += 1
+            if clean_calls["count"] > 2:
+                raise AssertionError("budget-blocked window retried without progress")
+            return False
+
+        monkeypatch.setattr(s3, "_frozen_edges_clean_3d", dirty_rim)
+
+        def fake_optimize(phi_sub_flat, phi_init_sub_flat, subvolume_size, *args, **kwargs):
+            optimize_calls["count"] += 1
+            return phi_sub_flat, 0.0, True
+
+        monkeypatch.setattr(s3, "_optimize_single_window_3d", fake_optimize)
+        monkeypatch.setattr(s3, "_apply_result_3d", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            s3,
+            "_update_metrics_3d",
+            lambda *args, **kwargs: (np.ones((5, 5, 5), dtype=np.float64), 0, 1.0),
+        )
+
+        jac, subvolume_size, per_index_iter, center = _serial_fix_voxel(
+            neg_index=(2, 2, 2),
+            phi=phi,
+            phi_init=phi_init,
+            jacobian_matrix=jacobian_matrix,
+            volume_shape=(5, 5, 5),
+            window_counts=window_counts,
+            max_per_index_iter=3,
+            max_minimize_iter=5,
+            max_window=(5, 5, 5),
+            threshold=0.01,
+            err_tol=1e-5,
+            method_name="SLSQP",
+            verbose=0,
+            error_list=[],
+            num_neg_jac=[],
+            min_jdet_list=[],
+            iter_times=[],
+            min_window=(3, 3, 3),
+            labeled_array=None,
+            max_window_voxels=27,
+        )
+
+        assert optimize_calls["count"] == 1
+        assert clean_calls["count"] == 1
+        assert per_index_iter == 1
+        assert subvolume_size == (3, 3, 3)
+        assert center == (2, 2, 2)
+        assert window_counts[(3, 3, 3)] == 1
+        np.testing.assert_array_equal(jac, 1.0)

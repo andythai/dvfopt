@@ -53,6 +53,7 @@ def iterative_parallel(
     enforce_shoelace=False,
     enforce_injectivity=False,
     injectivity_threshold=None,
+    enforce_triangles=False,
     max_doublings=5,
 ):
     """Hybrid serial/parallel iterative SLSQP correction.
@@ -109,6 +110,7 @@ def iterative_parallel(
             max_workers=max_workers,
             enforce_shoelace=enforce_shoelace,
             enforce_injectivity=enforce_injectivity,
+            enforce_triangles=enforce_triangles,
         )
 
     if max_workers is None:
@@ -128,7 +130,8 @@ def iterative_parallel(
 
     jacobian_matrix, quality_matrix, init_neg, init_min = _update_metrics(
         phi, phi_init, enforce_shoelace, enforce_injectivity,
-        num_neg_jac, min_jdet_list)
+        num_neg_jac, min_jdet_list,
+        enforce_triangles=enforce_triangles)
 
     _log(verbose, 1,
          f"[init] Neg-Jdet pixels: {init_neg}  |  min Jdet: {init_min:.6f}")
@@ -246,6 +249,7 @@ def iterative_parallel(
                         enforce_shoelace=enforce_shoelace,
                         enforce_injectivity=enforce_injectivity,
                         injectivity_threshold=injectivity_threshold,
+                        enforce_triangles=enforce_triangles,
                         min_window=global_min_window,
                         labeled=_labeled_neg,
                     )
@@ -331,6 +335,7 @@ def iterative_parallel(
                         enforce_shoelace,
                         enforce_injectivity,
                         injectivity_threshold,
+                        enforce_triangles,
                     )
                     futures[fut] = (neg_idx, cz, cy, cx, sub_size, is_padded, opt_size)
 
@@ -358,7 +363,8 @@ def iterative_parallel(
                 jacobian_matrix, quality_matrix, cur_neg, cur_min = _update_metrics(
                     phi, phi_init, enforce_shoelace, enforce_injectivity,
                     num_neg_jac, min_jdet_list, error_list,
-                    jacobian_matrix=jacobian_matrix)
+                    jacobian_matrix=jacobian_matrix,
+                    enforce_triangles=enforce_triangles)
 
                 cur_err = error_list[-1]
                 _log(verbose, 1,

@@ -16,6 +16,7 @@ from dvfopt.core.slsqp.spatial3d import (
     _frozen_edges_clean_3d,
     get_phi_sub_flat_3d,
     _edge_flags_3d,
+    _clamp_to_voxel_budget,
 )
 from dvfopt.core.slsqp.constraints3d import (
     jacobian_constraint_3d,
@@ -205,22 +206,35 @@ def _serial_fix_voxel(
     max_window, threshold, err_tol, method_name, verbose,
     error_list, num_neg_jac, min_jdet_list, iter_times,
     min_window=(3, 3, 3),
+    labeled_array=None,
+    max_window_voxels=None,
 ):
     """Fix a single voxel using the serial adaptive-window inner loop.
 
     Mutates *phi* and the accumulator lists in-place.
+
+    Parameters
+    ----------
+    labeled_array : ndarray or None
+        Pre-computed connected-component labels for the full Jacobian
+        grid.  Passed to ``neg_jdet_bounding_window_3d`` so the
+        bounding box is computed for the target connected component
+        only.
 
     Returns
     -------
     jacobian_matrix, subvolume_size, per_index_iter, (cz, cy, cx)
     """
     subvolume_size, bbox_center = neg_jdet_bounding_window_3d(
-        jacobian_matrix, neg_index, threshold, err_tol)
+        jacobian_matrix, neg_index, threshold, err_tol,
+        labeled_array=labeled_array)
     max_sz, max_sy, max_sx = _unpack_size_3d(max_window)
     min_sz, min_sy, min_sx = _unpack_size_3d(min_window)
     subvolume_size = (max(min(subvolume_size[0], max_sz), min_sz),
                       max(min(subvolume_size[1], max_sy), min_sy),
                       max(min(subvolume_size[2], max_sx), min_sx))
+    subvolume_size = _clamp_to_voxel_budget(
+        subvolume_size, max_window_voxels, min_window)
 
     per_index_iter = 0
     window_reached_max = False
@@ -264,12 +278,20 @@ def _serial_fix_voxel(
                     subvolume_size, threshold, err_tol, freeze_mask)):
             _log(verbose, 2,
                  f"  [skip] Frozen edges have neg Jdet at "
-                 f"win {sz}x{sy}x{sx} — growing")
+                 f"win {sz}x{sy}x{sx} - growing")
             if sz < max_sz or sy < max_sy or sx < max_sx:
-                subvolume_size = (min(sz + 2, max_sz),
-                                  min(sy + 2, max_sy),
-                                  min(sx + 2, max_sx))
-            continue
+                grown = (min(sz + 2, max_sz),
+                         min(sy + 2, max_sy),
+                         min(sx + 2, max_sx))
+                clamped = _clamp_to_voxel_budget(
+                    grown, max_window_voxels, min_window)
+                if clamped != (sz, sy, sx):
+                    subvolume_size = clamped
+                    continue
+                _log(verbose, 2,
+                     "  [skip] Voxel cap blocked growth; "
+                     "treating current window as max")
+            window_reached_max = True
 
         per_index_iter += 1
         window_counts[subvolume_size] += 1
@@ -309,12 +331,17 @@ def _serial_fix_voxel(
         if not (local < threshold - err_tol).any():
             break
         if sz < max_sz or sy < max_sy or sx < max_sx:
-            subvolume_size = (min(sz + 2, max_sz),
-                              min(sy + 2, max_sy),
-                              min(sx + 2, max_sx))
+            grown = (min(sz + 2, max_sz),
+                     min(sy + 2, max_sy),
+                     min(sx + 2, max_sx))
+            clamped = _clamp_to_voxel_budget(
+                grown, max_window_voxels, min_window)
+            if clamped == (sz, sy, sx):
+                # Voxel budget blocked growth → treat as at-max.
+                window_reached_max = True
+            subvolume_size = clamped
         else:
             window_reached_max = True
 
     return jacobian_matrix, subvolume_size, per_index_iter, (cz, cy, cx)
-
 

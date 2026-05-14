@@ -166,3 +166,4 @@ cython_debug/
 /archive
 .claude/settings.local.json
 *.npz
+.claude/scheduled_tasks.lock

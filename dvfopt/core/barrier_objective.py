@@ -116,10 +116,15 @@ def _jdet_grad_T_v(phi_flat, grid_size, v):
 
 
 def penalty_objective_3d(phi_flat, phi_init_flat, grid_size,
-                         threshold, margin, lam):
-    """F = ½‖u-u₀‖² + λ Σ max(0, (threshold+margin) − J_i)²
+                         threshold, margin, lam, active_mask=None):
+    """F = ½‖u-u₀‖² + λ Σᵢ max(0, (threshold+margin) − J_i)²
 
     Smooth (C¹). Returns (value, gradient).
+
+    ``active_mask`` (flat bool, length D*H*W) restricts the penalty sum to a
+    subset of voxels — used by the windowed solver to skip the frozen rim,
+    whose Jdet is a one-sided-difference artefact that does not match the
+    global central-difference Jdet.
     """
     diff = phi_flat - phi_init_flat
     data = 0.5 * float(np.dot(diff, diff))
@@ -127,6 +132,8 @@ def penalty_objective_3d(phi_flat, phi_init_flat, grid_size,
     j = jdet_full(phi_flat, grid_size)
     target = threshold + margin
     viol = np.maximum(0.0, target - j)
+    if active_mask is not None:
+        viol = viol * active_mask
     pen = lam * float(np.dot(viol, viol))
 
     grad = diff.copy()
@@ -138,21 +145,33 @@ def penalty_objective_3d(phi_flat, phi_init_flat, grid_size,
 
 
 def barrier_objective_3d(phi_flat, phi_init_flat, grid_size,
-                         threshold, mu):
-    """F = ½‖u-u₀‖² − μ Σ log(J_i − threshold)
+                         threshold, mu, active_mask=None):
+    """F = ½‖u-u₀‖² − μ Σᵢ log(J_i − threshold)
 
-    Requires strict feasibility. Returns (+inf, zeros) on infeasible iterates
-    so L-BFGS-B's line search rejects the step.
+    Requires strict feasibility on the *active* voxels. Returns (+inf, zeros)
+    on infeasible iterates so L-BFGS-B's line search rejects the step.
+
+    ``active_mask`` (flat bool, length D*H*W) restricts the barrier sum to a
+    subset of voxels — used by the windowed solver to skip the frozen rim.
     """
     diff = phi_flat - phi_init_flat
     data = 0.5 * float(np.dot(diff, diff))
 
     j = jdet_full(phi_flat, grid_size)
     slack = j - threshold
-    if np.any(slack <= 0.0):
-        return np.inf, np.zeros_like(phi_flat)
 
-    bar = -mu * float(np.log(slack).sum())
-    dF_dJ = -mu / slack
+    if active_mask is None:
+        if np.any(slack <= 0.0):
+            return np.inf, np.zeros_like(phi_flat)
+        bar = -mu * float(np.log(slack).sum())
+        dF_dJ = -mu / slack
+    else:
+        active_slack = slack[active_mask]
+        if np.any(active_slack <= 0.0):
+            return np.inf, np.zeros_like(phi_flat)
+        bar = -mu * float(np.log(active_slack).sum())
+        dF_dJ = np.zeros_like(slack)
+        dF_dJ[active_mask] = -mu / active_slack
+
     grad = diff + _jdet_grad_T_v(phi_flat, grid_size, dF_dJ)
     return data + bar, grad
