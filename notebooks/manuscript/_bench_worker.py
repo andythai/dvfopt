@@ -525,11 +525,11 @@ def full_grid_l1_2d_worker(phi_crop, phi_anchor_crop, threshold, eps,
 
 def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
                        threshold, max_iter, send):
-    """2D L2 SLSQP with 2-triangle constraint + analytical Jacobian.
+    """2D L2 SLSQP with 2-triangle constraint, frozen-edge interior mask.
 
-    Frozen-edge interior_mask (corners outside the mask stay fixed).
-    Provides analytical constraint Jacobian to SLSQP -- avoids the
-    finite-difference column sweep that dominates QP cost.
+    Note: the analytical-Jacobian path (_make_2tri_jac_2d) was tried but
+    the dense Jacobian-build cost (~25 ms/call for typical crops) exceeds
+    the finite-difference cost on our small clusters. Sticking with FD.
     """
     try:
         from dvfopt.jacobian.triangle_sign import _triangle_areas_2d
@@ -550,8 +550,7 @@ def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
             T1, T2 = _triangle_areas_2d(phi[0], phi[1])
             return np.concatenate([T1.flatten(), T2.flatten()])
 
-        jac_func = _make_2tri_jac_2d(phi_win, interior_mask)
-        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf, jac=jac_func)
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
         res = minimize(obj, z_init, jac=True, method='SLSQP', constraints=[nl],
                        options={'maxiter': max_iter, 'disp': False})
         info = {'nit': int(res.nit), 'success': bool(res.success),
@@ -566,7 +565,7 @@ def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
 
 def local_l1_2d_worker(phi_win, phi_anchor_win, interior_mask,
                        threshold, eps, max_iter, send):
-    """2D smoothed-L1 SLSQP with 2-triangle constraint + analytical Jacobian."""
+    """2D smoothed-L1 SLSQP with 2-triangle constraint."""
     try:
         from dvfopt.jacobian.triangle_sign import _triangle_areas_2d
         pack, unpack, n_int = _interior_pack_unpack_2d(phi_win, interior_mask)
@@ -587,8 +586,7 @@ def local_l1_2d_worker(phi_win, phi_anchor_win, interior_mask,
             T1, T2 = _triangle_areas_2d(phi[0], phi[1])
             return np.concatenate([T1.flatten(), T2.flatten()])
 
-        jac_func = _make_2tri_jac_2d(phi_win, interior_mask)
-        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf, jac=jac_func)
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
         res = minimize(obj, z_init, jac=True, method='SLSQP', constraints=[nl],
                        options={'maxiter': max_iter, 'disp': False})
         info = {'nit': int(res.nit), 'success': bool(res.success),
