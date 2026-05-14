@@ -298,6 +298,128 @@ def _interior_pack_unpack_2d(phi_win, interior_mask):
     return pack, unpack, n_int
 
 
+def _make_2tri_jac_2d(phi_win, interior_mask):
+    """Build a closure ``jac(z) -> dense (n_constr, n_vars)`` that
+    returns the analytical Jacobian of the 2-triangle constraint at z.
+
+    Provides this Jacobian to SLSQP turns the finite-difference column
+    sweep (N+1 constraint evals per QP iter) into a single tight numpy
+    expression -- usually 10-100x speedup on the QP loop for crops of
+    a few hundred variables.
+
+    Math: T1[y,x] = -0.5 * det([BL-TR, BR-TR]) depends on the 3 corners
+    TR=(y, x+1), BL=(y+1, x), BR=(y+1, x+1). T2[y,x] depends on TL, BL,
+    TR. Since corner_y = ref_y + dy and corner_x = ref_x + dx, the
+    partial wrt dy equals the partial wrt corner_y; same for dx.
+
+      dT1/dTR.x = +0.5 (BR.y - BL.y)
+      dT1/dTR.y = +0.5 (BL.x - BR.x)
+      dT1/dBL.x = +0.5 (TR.y - BR.y)
+      dT1/dBL.y = +0.5 (BR.x - TR.x)
+      dT1/dBR.x = +0.5 (BL.y - TR.y)
+      dT1/dBR.y = +0.5 (TR.x - BL.x)
+    T2 has the same form with (A,B,C) = (TL, BL, TR).
+    """
+    _, H, W = phi_win.shape
+    Hc, Wc = H - 1, W - 1
+    n_cells = Hc * Wc
+    n_constr = 2 * n_cells
+
+    int_idx = np.argwhere(interior_mask)
+    n_int = len(int_idx)
+    iy = int_idx[:, 0].copy()
+    ix = int_idx[:, 1].copy()
+    int_pos = np.full((H, W), -1, dtype=np.int64)
+    int_pos[iy, ix] = np.arange(n_int)
+    n_vars = 2 * n_int
+
+    # Per-cell corner -> variable-column indices (computed once).
+    cy_idx = np.arange(Hc, dtype=np.int64)[:, None]
+    cx_idx = np.arange(Wc, dtype=np.int64)[None, :]
+    col_TL_dy = int_pos[cy_idx,     cx_idx]
+    col_TR_dy = int_pos[cy_idx,     cx_idx + 1]
+    col_BL_dy = int_pos[cy_idx + 1, cx_idx]
+    col_BR_dy = int_pos[cy_idx + 1, cx_idx + 1]
+    col_TL_dx = np.where(col_TL_dy >= 0, col_TL_dy + n_int, -1)
+    col_TR_dx = np.where(col_TR_dy >= 0, col_TR_dy + n_int, -1)
+    col_BL_dx = np.where(col_BL_dy >= 0, col_BL_dy + n_int, -1)
+    col_BR_dx = np.where(col_BR_dy >= 0, col_BR_dy + n_int, -1)
+
+    rows_T1 = (cy_idx * Wc + cx_idx).astype(np.int64) * np.ones((Hc, Wc), dtype=np.int64)
+    rows_T2 = rows_T1 + n_cells
+
+    # Pre-flatten valid (row, col) pairs for each partial.
+    # Each partial-write covers all cells; some columns are -1 (corner
+    # not in interior). Precompute valid masks + flat row/col arrays.
+    partials = []
+    for rows_arr, col_arr, label in [
+        (rows_T1, col_TR_dy, 'T1_TR_dy'),
+        (rows_T1, col_TR_dx, 'T1_TR_dx'),
+        (rows_T1, col_BL_dy, 'T1_BL_dy'),
+        (rows_T1, col_BL_dx, 'T1_BL_dx'),
+        (rows_T1, col_BR_dy, 'T1_BR_dy'),
+        (rows_T1, col_BR_dx, 'T1_BR_dx'),
+        (rows_T2, col_TL_dy, 'T2_TL_dy'),
+        (rows_T2, col_TL_dx, 'T2_TL_dx'),
+        (rows_T2, col_TR_dy, 'T2_TR_dy'),
+        (rows_T2, col_TR_dx, 'T2_TR_dx'),
+        (rows_T2, col_BL_dy, 'T2_BL_dy'),
+        (rows_T2, col_BL_dx, 'T2_BL_dx'),
+    ]:
+        col_flat = col_arr.ravel()
+        valid = col_flat >= 0
+        partials.append({
+            'label': label,
+            'rows': rows_arr.ravel()[valid],
+            'cols': col_flat[valid],
+            'valid': valid,  # bool mask (n_cells,)
+        })
+
+    iy_local = iy
+    ix_local = ix
+    ref_y = np.arange(H, dtype=np.float64)[:, None]
+    ref_x = np.arange(W, dtype=np.float64)[None, :]
+    phi_base = phi_win.copy()
+
+    def jac(z):
+        # Reconstruct full phi from frozen base + interior vars.
+        phi_base[0][iy_local, ix_local] = z[:n_int]
+        phi_base[1][iy_local, ix_local] = z[n_int:]
+        def_x = ref_x + phi_base[1]
+        def_y = ref_y + phi_base[0]
+        TL_x = def_x[:-1, :-1]; TL_y = def_y[:-1, :-1]
+        TR_x = def_x[:-1, 1:];  TR_y = def_y[:-1, 1:]
+        BL_x = def_x[1:,  :-1]; BL_y = def_y[1:,  :-1]
+        BR_x = def_x[1:,  1:];  BR_y = def_y[1:,  1:]
+
+        # Per-cell partial values (each shape (Hc, Wc)).
+        # T1 = -0.5 det([B-A, C-A]) with (A,B,C) = (TR, BL, BR).
+        dT1_TR_x = 0.5 * (BR_y - BL_y)
+        dT1_TR_y = 0.5 * (BL_x - BR_x)
+        dT1_BL_x = 0.5 * (TR_y - BR_y)
+        dT1_BL_y = 0.5 * (BR_x - TR_x)
+        dT1_BR_x = 0.5 * (BL_y - TR_y)
+        dT1_BR_y = 0.5 * (TR_x - BL_x)
+        # T2 with (A,B,C) = (TL, BL, TR).
+        dT2_TL_x = 0.5 * (TR_y - BL_y)
+        dT2_TL_y = 0.5 * (BL_x - TR_x)
+        dT2_BL_x = 0.5 * (TL_y - TR_y)
+        dT2_BL_y = 0.5 * (TR_x - TL_x)
+        dT2_TR_x = 0.5 * (BL_y - TL_y)
+        dT2_TR_y = 0.5 * (TL_x - BL_x)
+
+        vals = [
+            dT1_TR_y, dT1_TR_x, dT1_BL_y, dT1_BL_x, dT1_BR_y, dT1_BR_x,
+            dT2_TL_y, dT2_TL_x, dT2_TR_y, dT2_TR_x, dT2_BL_y, dT2_BL_x,
+        ]
+        J = np.zeros((n_constr, n_vars), dtype=np.float64)
+        for p, v in zip(partials, vals):
+            J[p['rows'], p['cols']] = v.ravel()[p['valid']]
+        return J
+
+    return jac
+
+
 def _seed_perturb(z_init, z_anchor, sigma=1e-3, seed=42):
     """If z_init is exactly z_anchor, add a tiny Gaussian perturbation so
     SLSQP starts off the objective's zero-gradient point. Notebook-14
@@ -310,13 +432,104 @@ def _seed_perturb(z_init, z_anchor, sigma=1e-3, seed=42):
     return z_init + rng.normal(scale=sigma, size=z_init.shape)
 
 
+def full_grid_l2_2d_worker(phi_crop, phi_anchor_crop, threshold,
+                            max_iter, send):
+    """Full-grid 2D L2 SLSQP on a crop. Every voxel-corner is a variable
+    (no frozen edges). Constraint: every 2-triangle area >= threshold.
+    Mirrors notebook 17/18's converge_to_zero_folds inner SLSQP call.
+    """
+    try:
+        from dvfopt.jacobian.triangle_sign import _triangle_areas_2d
+        _, H, W = phi_crop.shape
+        n_pix = H * W
+
+        def pack(phi):
+            return np.concatenate([phi[0].flatten(), phi[1].flatten()])
+
+        def unpack(z_flat):
+            dy = z_flat[:n_pix].reshape(H, W)
+            dx = z_flat[n_pix:].reshape(H, W)
+            return np.stack([dy, dx])
+
+        z_init = pack(phi_crop)
+        z_anchor = pack(phi_anchor_crop)
+        if np.allclose(z_init, z_anchor):
+            rng = np.random.default_rng(42)
+            z_init = z_init + rng.normal(scale=1e-3, size=z_init.shape)
+
+        def obj(z):
+            d = z - z_anchor
+            return 0.5 * float(np.dot(d, d)), d
+
+        def constr(z):
+            phi = unpack(z)
+            T1, T2 = _triangle_areas_2d(phi[0], phi[1])
+            return np.concatenate([T1.flatten(), T2.flatten()])
+
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
+        res = minimize(obj, z_init, jac=True, method='SLSQP',
+                       constraints=[nl],
+                       options={'maxiter': max_iter, 'disp': False})
+        info = {'nit': int(res.nit), 'success': bool(res.success),
+                'status': int(res.status)}
+        send.send(('ok', unpack(res.x), info))
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        send.send(('err', f'{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=4)}'))
+    finally:
+        send.close()
+
+
+def full_grid_l1_2d_worker(phi_crop, phi_anchor_crop, threshold, eps,
+                            max_iter, send):
+    """Full-grid 2D smoothed-L1 SLSQP polish on a crop."""
+    try:
+        from dvfopt.jacobian.triangle_sign import _triangle_areas_2d
+        _, H, W = phi_crop.shape
+        n_pix = H * W
+
+        def pack(phi):
+            return np.concatenate([phi[0].flatten(), phi[1].flatten()])
+
+        def unpack(z_flat):
+            dy = z_flat[:n_pix].reshape(H, W)
+            dx = z_flat[n_pix:].reshape(H, W)
+            return np.stack([dy, dx])
+
+        z_init = pack(phi_crop)
+        z_anchor = pack(phi_anchor_crop)
+
+        def obj(z):
+            d = z - z_anchor
+            s = np.sqrt(d * d + eps * eps)
+            return float(s.sum()), d / s
+
+        def constr(z):
+            phi = unpack(z)
+            T1, T2 = _triangle_areas_2d(phi[0], phi[1])
+            return np.concatenate([T1.flatten(), T2.flatten()])
+
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
+        res = minimize(obj, z_init, jac=True, method='SLSQP',
+                       constraints=[nl],
+                       options={'maxiter': max_iter, 'ftol': 1e-9, 'disp': False})
+        info = {'nit': int(res.nit), 'success': bool(res.success),
+                'status': int(res.status)}
+        send.send(('ok', unpack(res.x), info))
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        send.send(('err', f'{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=4)}'))
+    finally:
+        send.close()
+
+
 def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
                        threshold, max_iter, send):
-    """2D L2 SLSQP with 2-triangle constraint, frozen-edge interior mask.
+    """2D L2 SLSQP with 2-triangle constraint + analytical Jacobian.
 
-    Adds a tiny perturbation to z_init when it equals z_anchor (zero
-    objective gradient at start otherwise leaves SLSQP without a
-    descent direction).
+    Frozen-edge interior_mask (corners outside the mask stay fixed).
+    Provides analytical constraint Jacobian to SLSQP -- avoids the
+    finite-difference column sweep that dominates QP cost.
     """
     try:
         from dvfopt.jacobian.triangle_sign import _triangle_areas_2d
@@ -337,7 +550,8 @@ def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
             T1, T2 = _triangle_areas_2d(phi[0], phi[1])
             return np.concatenate([T1.flatten(), T2.flatten()])
 
-        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
+        jac_func = _make_2tri_jac_2d(phi_win, interior_mask)
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf, jac=jac_func)
         res = minimize(obj, z_init, jac=True, method='SLSQP', constraints=[nl],
                        options={'maxiter': max_iter, 'disp': False})
         info = {'nit': int(res.nit), 'success': bool(res.success),
@@ -352,7 +566,7 @@ def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
 
 def local_l1_2d_worker(phi_win, phi_anchor_win, interior_mask,
                        threshold, eps, max_iter, send):
-    """2D smoothed-L1 SLSQP with 2-triangle constraint."""
+    """2D smoothed-L1 SLSQP with 2-triangle constraint + analytical Jacobian."""
     try:
         from dvfopt.jacobian.triangle_sign import _triangle_areas_2d
         pack, unpack, n_int = _interior_pack_unpack_2d(phi_win, interior_mask)
@@ -373,7 +587,8 @@ def local_l1_2d_worker(phi_win, phi_anchor_win, interior_mask,
             T1, T2 = _triangle_areas_2d(phi[0], phi[1])
             return np.concatenate([T1.flatten(), T2.flatten()])
 
-        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
+        jac_func = _make_2tri_jac_2d(phi_win, interior_mask)
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf, jac=jac_func)
         res = minimize(obj, z_init, jac=True, method='SLSQP', constraints=[nl],
                        options={'maxiter': max_iter, 'disp': False})
         info = {'nit': int(res.nit), 'success': bool(res.success),
