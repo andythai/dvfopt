@@ -68,6 +68,7 @@ def _warp_corners(phi):
 def _tet_volumes_unsigned(corners):
     cell_corners = []
     for (oz, oy, ox) in _CUBE_CORNERS:
+        oz, oy, ox = int(oz), int(oy), int(ox)  # avoid int8 overflow in slice arithmetic
         cell_corners.append(corners[oz:corners.shape[0] - 1 + oz,
                                     oy:corners.shape[1] - 1 + oy,
                                     ox:corners.shape[2] - 1 + ox])
@@ -110,6 +111,101 @@ def _interior_pack_unpack(phi_win, interior_mask):
         return out
 
     return pack, unpack, n_int
+
+
+def full_grid_l2_3d_worker(phi_crop, phi_anchor_crop, threshold,
+                            max_iter, send):
+    """Full-grid L2 SLSQP on a 3D *crop*: every voxel-corner is a variable
+    (no frozen edges), constraint is per-tet >= threshold across the
+    whole crop. Mirrors notebook 17/18's converge_to_zero_folds inner
+    SLSQP call. Use for cropped sub-volumes where boundary motion is OK.
+    """
+    try:
+        D, H, W = phi_crop.shape[1:]
+        voxels = D * H * W
+
+        def pack(phi):
+            return np.concatenate([phi[2].flatten(), phi[1].flatten(),
+                                    phi[0].flatten()])
+
+        def unpack(z_flat):
+            dx = z_flat[:voxels].reshape(D, H, W)
+            dy = z_flat[voxels:2*voxels].reshape(D, H, W)
+            dz = z_flat[2*voxels:].reshape(D, H, W)
+            return np.stack([dz, dy, dx])
+
+        z_init = pack(phi_crop)
+        z_anchor = pack(phi_anchor_crop)
+        if np.allclose(z_init, z_anchor):
+            rng = np.random.default_rng(42)
+            z_init = z_init + rng.normal(scale=1e-3, size=z_init.shape)
+
+        def obj(z):
+            d = z - z_anchor
+            return 0.5 * float(np.dot(d, d)), d
+
+        def constr(z):
+            return tet_signed_volumes(unpack(z)).flatten()
+
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
+        res = minimize(obj, z_init, jac=True, method='SLSQP',
+                       constraints=[nl],
+                       options={'maxiter': max_iter, 'disp': False})
+        info = {'nit': int(res.nit), 'success': bool(res.success),
+                'status': int(res.status)}
+        send.send(('ok', unpack(res.x), info))
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        send.send(('err', f'{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=4)}'))
+    finally:
+        send.close()
+
+
+def full_grid_l1_3d_worker(phi_crop, phi_anchor_crop, threshold, eps,
+                            max_iter, send):
+    """Full-grid L1 polish on a 3D crop. Smoothed-L1 objective anchored
+    at phi_anchor_crop, per-tet >= threshold constraint, no frozen edges.
+    """
+    try:
+        D, H, W = phi_crop.shape[1:]
+        voxels = D * H * W
+
+        def pack(phi):
+            return np.concatenate([phi[2].flatten(), phi[1].flatten(),
+                                    phi[0].flatten()])
+
+        def unpack(z_flat):
+            dx = z_flat[:voxels].reshape(D, H, W)
+            dy = z_flat[voxels:2*voxels].reshape(D, H, W)
+            dz = z_flat[2*voxels:].reshape(D, H, W)
+            return np.stack([dz, dy, dx])
+
+        z_init = pack(phi_crop)
+        z_anchor = pack(phi_anchor_crop)
+        if np.allclose(z_init, z_anchor):
+            rng = np.random.default_rng(42)
+            z_init = z_init + rng.normal(scale=1e-3, size=z_init.shape)
+
+        def obj(z):
+            d = z - z_anchor
+            s = np.sqrt(d * d + eps * eps)
+            return float(s.sum()), d / s
+
+        def constr(z):
+            return tet_signed_volumes(unpack(z)).flatten()
+
+        nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
+        res = minimize(obj, z_init, jac=True, method='SLSQP',
+                       constraints=[nl],
+                       options={'maxiter': max_iter, 'disp': False})
+        info = {'nit': int(res.nit), 'success': bool(res.success),
+                'status': int(res.status)}
+        send.send(('ok', unpack(res.x), info))
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        send.send(('err', f'{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=4)}'))
+    finally:
+        send.close()
 
 
 def local_l2_3d_worker(phi_win, phi_anchor_win, interior_mask,
@@ -171,7 +267,7 @@ def local_l1_3d_worker(phi_win, phi_anchor_win, interior_mask,
 
         nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
         res = minimize(obj, z_init, jac=True, method='SLSQP', constraints=[nl],
-                       options={'maxiter': max_iter, 'ftol': 1e-9, 'disp': False})
+                       options={'maxiter': max_iter, 'disp': False})
         info = {'nit': int(res.nit), 'success': bool(res.success),
                 'status': int(res.status)}
         send.send(('ok', unpack(res.x, phi_win), info))
@@ -265,6 +361,7 @@ def local_l1_2d_worker(phi_win, phi_anchor_win, interior_mask,
             return
         z_init = pack(phi_win)
         z_anchor = pack(phi_anchor_win)
+        z_init = _seed_perturb(z_init, z_anchor)
 
         def obj(z):
             d = z - z_anchor
@@ -278,7 +375,7 @@ def local_l1_2d_worker(phi_win, phi_anchor_win, interior_mask,
 
         nl = NonlinearConstraint(constr, lb=threshold, ub=np.inf)
         res = minimize(obj, z_init, jac=True, method='SLSQP', constraints=[nl],
-                       options={'maxiter': max_iter, 'ftol': 1e-9, 'disp': False})
+                       options={'maxiter': max_iter, 'disp': False})
         info = {'nit': int(res.nit), 'success': bool(res.success),
                 'status': int(res.status)}
         send.send(('ok', unpack(res.x, phi_win), info))
