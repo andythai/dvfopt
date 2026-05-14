@@ -122,6 +122,10 @@ def local_l2_3d_worker(phi_win, phi_anchor_win, interior_mask,
             return
         z_init = pack(phi_win)
         z_anchor = pack(phi_anchor_win)
+        # Avoid SLSQP's zero-gradient start when phi_win == phi_anchor_win.
+        if np.allclose(z_init, z_anchor):
+            rng = np.random.default_rng(42)
+            z_init = z_init + rng.normal(scale=1e-3, size=z_init.shape)
 
         def obj(z):
             d = z - z_anchor
@@ -153,6 +157,9 @@ def local_l1_3d_worker(phi_win, phi_anchor_win, interior_mask,
             return
         z_init = pack(phi_win)
         z_anchor = pack(phi_anchor_win)
+        if np.allclose(z_init, z_anchor):
+            rng = np.random.default_rng(42)
+            z_init = z_init + rng.normal(scale=1e-3, size=z_init.shape)
 
         def obj(z):
             d = z - z_anchor
@@ -195,9 +202,26 @@ def _interior_pack_unpack_2d(phi_win, interior_mask):
     return pack, unpack, n_int
 
 
+def _seed_perturb(z_init, z_anchor, sigma=1e-3, seed=42):
+    """If z_init is exactly z_anchor, add a tiny Gaussian perturbation so
+    SLSQP starts off the objective's zero-gradient point. Notebook-14
+    style reactive warm-start, applied to *every* SLSQP call regardless
+    of whether the previous run failed.
+    """
+    if not np.allclose(z_init, z_anchor):
+        return z_init
+    rng = np.random.default_rng(seed)
+    return z_init + rng.normal(scale=sigma, size=z_init.shape)
+
+
 def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
                        threshold, max_iter, send):
-    """2D L2 SLSQP with 2-triangle constraint, frozen-edge interior mask."""
+    """2D L2 SLSQP with 2-triangle constraint, frozen-edge interior mask.
+
+    Adds a tiny perturbation to z_init when it equals z_anchor (zero
+    objective gradient at start otherwise leaves SLSQP without a
+    descent direction).
+    """
     try:
         from dvfopt.jacobian.triangle_sign import _triangle_areas_2d
         pack, unpack, n_int = _interior_pack_unpack_2d(phi_win, interior_mask)
@@ -206,6 +230,7 @@ def local_l2_2d_worker(phi_win, phi_anchor_win, interior_mask,
             return
         z_init = pack(phi_win)
         z_anchor = pack(phi_anchor_win)
+        z_init = _seed_perturb(z_init, z_anchor)
 
         def obj(z):
             d = z - z_anchor
