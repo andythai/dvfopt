@@ -124,7 +124,9 @@ def append_row(row):
 
 
 def save_checkpoint(arr, idx):
-    tmp = CKPT_PATH + '.tmp'
+    # np.savez_compressed auto-appends .npz if missing, so the tmp path
+    # has to already end in .npz to land where we expect.
+    tmp = CKPT_PATH + '.tmp.npz'
     np.savez_compressed(tmp, phi_corrected=arr, next_cluster_idx=idx)
     os.replace(tmp, CKPT_PATH)
 

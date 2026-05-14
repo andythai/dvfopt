@@ -162,7 +162,7 @@ def append_row(row):
 
 
 def save_checkpoint(arr, idx):
-    tmp = CKPT_PATH + '.tmp'
+    tmp = CKPT_PATH + '.tmp.npz'
     np.savez_compressed(tmp, phi_corrected=arr, next_crop_idx=idx)
     os.replace(tmp, CKPT_PATH)
 

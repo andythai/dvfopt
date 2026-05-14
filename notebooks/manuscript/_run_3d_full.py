@@ -119,7 +119,7 @@ def append_row(row):
 
 
 def save_checkpoint(arr, outer_iter):
-    tmp = CKPT_PATH + '.tmp'
+    tmp = CKPT_PATH + '.tmp.npz'
     np.savez_compressed(tmp, phi_corrected=arr, outer_iter=outer_iter)
     os.replace(tmp, CKPT_PATH)
 
