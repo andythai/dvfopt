@@ -121,12 +121,15 @@ def normalize_benchmark_utils_imports(cell_source):
         while True:
             stripped = current.lstrip()
             if stripped.startswith(marker):
-                next_marker = current.find(marker, current.find(marker) + len(marker))
+                first_marker = current.find(marker)
+                # Split repeated benchmark_utils imports fused into one source string.
+                next_marker = current.find(marker, first_marker + len(marker))
                 if next_marker != -1:
                     normalized.append(current[:next_marker] + "\n")
                     current = current[next_marker:]
                     continue
             elif stripped.startswith(("from ", "import ")):
+                # Split a benchmark_utils import accidentally appended to another import line.
                 first = current.find(marker)
                 if first > 0:
                     normalized.append(current[:first] + "\n")
