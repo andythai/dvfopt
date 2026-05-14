@@ -51,14 +51,20 @@ EPS_L1 = 1e-4
 #   4. interior_mask = voxel corners adjacent to any cell in the
 #      dilated component. Slice-edge corners are naturally movable
 #      (no outside cell to constrain).
-MERGE_DILATION = 2          # base dilation applied to every fold cell.
-MAX_STUCK_GROWTH = 4        # cap on the per-cell extra dilation for stuck folds.
-                            # Cells that stay folded across N outer iters get
-                            # an extra min(N, MAX_STUCK_GROWTH) cells of
-                            # dilation -- so only the stubborn cells grow their
-                            # bbox, isolated residuals stay tight. Avoids the
-                            # global-escalator failure mode that inflated every
-                            # cluster's bbox and caused SLSQP timeouts.
+# MERGE_DILATION scales DOWN with residual count: dense fold regions need
+# joint solving (high merge), but few residuals just need tight individual
+# bboxes (low merge). Bigger bboxes are worse for SLSQP, so once the slice
+# is mostly cleared we shrink dilation to keep each cluster minimal.
+def _merge_for_n_neg(n_neg):
+    """Return MERGE_DILATION as a function of current fold-triangle count."""
+    if n_neg > 200:
+        return 2
+    if n_neg > 50:
+        return 1
+    return 0
+
+
+MERGE_DILATION = 2          # default / max; used only as the upper bound below.
 BBOX_PAD = 1
 MAX_CLUSTER_CELLS = 2000         # crops above this are skipped (over SLSQP cap)
 MAX_CLUSTER_PER_AXIS = 60
@@ -217,35 +223,25 @@ def _component_corner_mask(component_mask, h, w):
 
 
 def enumerate_clusters_2d(phi_slice, max_axis, max_cells,
-                           merge_dilation=None, stuck_count=None):
+                           merge_dilation=None):
     """phi_slice: (2, H, W). Returns list of cluster dicts.
 
-    Fold cells (min(T1, T2) <= 0) are dilated, then connected-component
-    labelled. The dilation is ``merge_dilation`` (default MERGE_DILATION)
-    cells uniformly, PLUS extra dilation around cells that have stayed
-    folded for several outer iters (``stuck_count``): cells stuck for k
-    iters get an extra ``min(k, MAX_STUCK_GROWTH)`` cells of dilation.
-
-    This grows only the stubborn-region bboxes, not every cluster.
+    Fold cells (min(T1, T2) <= 0) are dilated by ``merge_dilation``, then
+    connected-component labelled. With high merge_dilation, close fold
+    regions merge into one cluster (good for dense folds); with low or
+    zero merge_dilation, each fold cell becomes its own tight cluster
+    (good for sparse residuals).
     """
-    if merge_dilation is None:
-        merge_dilation = MERGE_DILATION
     T1, T2 = _triangle_areas_2d(phi_slice[0], phi_slice[1])
     cell_min = np.minimum(T1, T2)
     cell_fold_mask = cell_min <= 0
     if not cell_fold_mask.any():
         return []
-    # Base dilation around every fold cell.
+    n_neg = int((T1 <= 0).sum() + (T2 <= 0).sum())
+    if merge_dilation is None:
+        merge_dilation = _merge_for_n_neg(n_neg)
     merged_mask = (binary_dilation(cell_fold_mask, iterations=merge_dilation)
                    if merge_dilation > 0 else cell_fold_mask.copy())
-    # Extra dilation around cells that have been stuck for k>=1 iters.
-    # Cells at stuck_count k get an extra k cells of dilation, capped.
-    if stuck_count is not None:
-        max_k = int(min(stuck_count.max(), MAX_STUCK_GROWTH))
-        for k in range(1, max_k + 1):
-            layer = (stuck_count >= k) & cell_fold_mask
-            if layer.any():
-                merged_mask |= binary_dilation(layer, iterations=merge_dilation + k)
     labels, n_comp = cc_label(merged_mask)
     Hc, Wc = cell_fold_mask.shape
     bboxes = find_objects(labels)
@@ -499,27 +495,15 @@ def process_one_slice(z, phi_full, phi_anchor_full, executor=None):
     # re-solve until n_neg = 0 or no improvement.
     prev_n_neg = init_n_neg
     t_slice_start = time.time()
-    # Per-cell counter: how many consecutive outer iters this cell has
-    # been folded. Used to grow the dilation locally around stubborn
-    # folds without inflating every cluster's bbox.
-    cell_dims = (phi_slice.shape[1] - 1, phi_slice.shape[2] - 1)
-    stuck_count = np.zeros(cell_dims, dtype=np.int32)
-    prev_fold_mask = None
     for outer_it in range(MAX_CLUSTER_OUTER_ITERS):
         if time.time() - t_slice_start > MAX_SLICE_TIME_S:
             break
-        # Update stuck_count: cells that were folded last iter AND are
-        # still folded now get +1. Cells that cleared get reset to 0.
-        T1, T2 = _triangle_areas_2d(phi_slice[0], phi_slice[1])
-        cur_fold_mask = np.minimum(T1, T2) <= 0
-        if prev_fold_mask is not None:
-            still_stuck = cur_fold_mask & prev_fold_mask
-            stuck_count = np.where(still_stuck, stuck_count + 1, 0)
-        prev_fold_mask = cur_fold_mask.copy()
+        # merge_dilation is set inside enumerate_clusters_2d based on
+        # current n_neg: dense slices use MERGE=2, sparse residuals
+        # use MERGE=1 or MERGE=0 for tight individual bboxes.
         clusters = enumerate_clusters_2d(phi_slice,
                                           MAX_CLUSTER_PER_AXIS,
-                                          MAX_CLUSTER_CELLS,
-                                          stuck_count=stuck_count)
+                                          MAX_CLUSTER_CELLS)
         if not clusters:
             break
         total_clusters += len(clusters)
