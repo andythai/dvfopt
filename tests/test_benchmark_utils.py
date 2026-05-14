@@ -1,18 +1,16 @@
 """Tests for benchmark notebook utility helpers."""
 
-from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import sys
 
 import numpy as np
 
 
-benchmark_utils_path = (
-    Path(__file__).resolve().parents[1] / "benchmarks" / "benchmark_utils.py"
-)
-spec = spec_from_file_location("benchmark_utils", benchmark_utils_path)
-benchmark_utils = module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(benchmark_utils)
+benchmark_utils_dir = Path(__file__).resolve().parents[1] / "benchmarks"
+if str(benchmark_utils_dir) not in sys.path:
+    sys.path.insert(0, str(benchmark_utils_dir))
+
+import benchmark_utils
 
 
 def test_results_to_rows_keeps_flat_results_shape():

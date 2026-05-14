@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 
 from dvfopt import jacobian_det2D, jacobian_det3D
+from dvfopt._defaults import DEFAULT_PARAMS
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +210,11 @@ def results_to_rows(results, extra_cols=None):
     base_cols = ["case", "n_neg_init", "n_neg_final", "min_jdet_init",
                  "min_jdet", "l2_err", "time"]
     extra = extra_cols or []
+    aliases = {
+        "n_neg_final": ("n_neg_final", "neg"),
+        "l2_err": ("l2_err", "l2"),
+    }
+    metric_keys = {"min_jdet", "time", *(key for values in aliases.values() for key in values)}
 
     def _round_if_float(value):
         if isinstance(value, float):
@@ -216,22 +222,16 @@ def results_to_rows(results, extra_cols=None):
         return value
 
     def _has_metrics(payload):
-        return isinstance(payload, dict) and any(
-            key in payload for key in ("n_neg_final", "neg", "min_jdet", "l2_err", "l2", "time")
-        )
+        return isinstance(payload, dict) and any(key in payload for key in metric_keys)
 
     def _get_value(payload, key):
-        aliases = {
-            "n_neg_final": ("n_neg_final", "neg"),
-            "l2_err": ("l2_err", "l2"),
-        }
         for candidate in aliases.get(key, (key,)):
             if candidate in payload:
                 return payload[candidate]
         if key == "min_jdet_init" and "jac_init" in payload:
             return float(np.min(payload["jac_init"]))
         if key == "n_neg_init" and "jac_init" in payload:
-            return int(np.sum(payload["jac_init"] <= 0))
+            return int(np.sum(payload["jac_init"] < DEFAULT_PARAMS["threshold"]))
         return None
 
     include_method = False
@@ -262,7 +262,11 @@ def results_to_rows(results, extra_cols=None):
             row[c] = _round_if_float(_get_value(r, c))
         rows.append(row)
 
-    columns = ["case", "method"] + base_cols[1:] + extra if include_method else base_cols + extra
+    columns = (
+        ["case", "method"] + base_cols[1:] + extra
+        if include_method
+        else base_cols + extra
+    )
     return rows, columns
 
 
