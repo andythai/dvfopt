@@ -37,12 +37,12 @@ EPS_L1 = 1e-4
 
 MAX_WINDOW_PER_AXIS = 14
 MAX_WINDOW_CELLS = 200
-L2_MAX_OUTER = 5000
+L2_MAX_OUTER = 20000             # outer iters per perturb round
 L2_MAX_MINIMIZE_ITER = 250
 L2_LOCAL_TIMEOUT_S = 30
-L2_STALL_LIMIT = 30
-L2_PERTURB_SIGMA = 0.02
-L2_MAX_PERTURB_ROUNDS = 2
+L2_STALL_LIMIT = 150             # consecutive non-improving iters before perturb
+L2_PERTURB_SIGMA = 0.005         # smaller noise -- less damage L2 has to clean up
+L2_MAX_PERTURB_ROUNDS = 8
 
 L1_POLISH_MAX_ITER = 250
 L1_LOCAL_TIMEOUT_S = 20
@@ -147,10 +147,21 @@ def _build_window_around_2d(focus_cell, labels, cell_fold_mask,
 # ---------------------------------------------------------------------
 def _windowed_l2_pass(phi, phi_anchor, *, max_outer, max_minimize_iter,
                        local_timeout_s, stall_limit):
+    """Strict-monotonic windowed outer loop.
+
+    Each window solve is accepted only if it *strictly reduces* the
+    global n_neg_tri count; otherwise the slice's phi is reverted. The
+    function always returns the best phi (lowest n_neg) seen during the
+    pass, so a stalled or noisy late iteration can never undo earlier
+    progress.
+    """
     stats = {'outer_iters_run': 0, 'local_timeouts': 0,
              'local_errors': 0, 'local_successes': 0,
+             'local_no_progress': 0,
              'stalled': False, 'window_size_max': 0}
-    last_n_neg = None
+    T1, T2 = _triangle_areas_2d(phi[0], phi[1])
+    best_n_neg = int((T1 <= 0).sum() + (T2 <= 0).sum())
+    best_phi = phi.copy()
     stall = 0
     for outer in range(max_outer):
         T1, T2 = _triangle_areas_2d(phi[0], phi[1])
@@ -159,7 +170,10 @@ def _windowed_l2_pass(phi, phi_anchor, *, max_outer, max_minimize_iter,
         n_neg = int((T1 <= 0).sum() + (T2 <= 0).sum())
         if n_neg == 0 or not cell_fold_mask.any():
             stats['n_neg_after'] = n_neg
-            return phi, stats
+            best_n_neg = min(best_n_neg, n_neg)
+            best_phi = phi.copy() if n_neg <= best_n_neg else best_phi
+            stats['n_neg_after'] = best_n_neg
+            return best_phi, stats
         labels, _ = cc_label(cell_fold_mask)
         argmin_flat = int(cell_min.argmin())
         wy, wx = np.unravel_index(argmin_flat, cell_min.shape)
@@ -175,31 +189,45 @@ def _windowed_l2_pass(phi, phi_anchor, *, max_outer, max_minimize_iter,
         interior_mask = np.zeros((vsy, vsx), dtype=bool)
         if vsy > 2 and vsx > 2:
             interior_mask[1:-1, 1:-1] = True
+        # Snapshot the slice (cheap -- only the window) so we can revert
+        # if the solve didn't help globally.
+        phi_win_pre = phi[:, vy, vx].copy()
         status, payload, info = _run_worker_with_timeout(
             _bench_worker.local_l2_2d_worker,
             (phi_win, phi_anchor_win, interior_mask, THRESHOLD, max_minimize_iter),
             timeout_s=local_timeout_s)
         if status == 'ok':
             phi[:, vy, vx] = payload[0]
-            stats['local_successes'] += 1
+            T1, T2 = _triangle_areas_2d(phi[0], phi[1])
+            n_neg_now = int((T1 <= 0).sum() + (T2 <= 0).sum())
+            if n_neg_now < best_n_neg:
+                # Strictly better than the best so far -- accept and record.
+                best_n_neg = n_neg_now
+                best_phi = phi.copy()
+                stats['local_successes'] += 1
+                stall = 0
+            else:
+                # Solve succeeded but didn't strictly improve globally --
+                # revert so noise can't accumulate.
+                phi[:, vy, vx] = phi_win_pre
+                stats['local_no_progress'] += 1
+                stall += 1
         elif status == 'timeout':
             stats['local_timeouts'] += 1
+            stall += 1
         else:
             stats['local_errors'] += 1
-        T1, T2 = _triangle_areas_2d(phi[0], phi[1])
-        n_neg_now = int((T1 <= 0).sum() + (T2 <= 0).sum())
-        if last_n_neg is None or n_neg_now < last_n_neg:
-            stall = 0
-        else:
             stall += 1
-        last_n_neg = n_neg_now
         stats['outer_iters_run'] = outer + 1
+        if best_n_neg == 0:
+            stats['n_neg_after'] = 0
+            return best_phi, stats
         if stall >= stall_limit:
             stats['stalled'] = True
-            stats['n_neg_after'] = n_neg_now
-            return phi, stats
-    stats['n_neg_after'] = n_neg_now
-    return phi, stats
+            stats['n_neg_after'] = best_n_neg
+            return best_phi, stats
+    stats['n_neg_after'] = best_n_neg
+    return best_phi, stats
 
 
 def run_l2_phase(deformation_3channel):
@@ -208,13 +236,16 @@ def run_l2_phase(deformation_3channel):
                      deformation_3channel[2, 0].copy()])
     phi_anchor = phi.copy()
     H_, W_ = phi.shape[1:]
+    T1, T2 = _triangle_areas_2d(phi_anchor[0], phi_anchor[1])
+    best_n_neg_global = int((T1 <= 0).sum() + (T2 <= 0).sum())
+    best_phi_global = phi.copy()
     info = {'wall_time': 0.0, 'exception': None, 'timed_out': False,
             'outer_iters_total': 0, 'local_timeouts_total': 0,
             'local_errors_total': 0, 'local_successes_total': 0,
             'perturb_rounds': 0, 'final_stalled': False}
     try:
         for r in range(L2_MAX_PERTURB_ROUNDS + 1):
-            phi, stats = _windowed_l2_pass(
+            pass_phi, stats = _windowed_l2_pass(
                 phi, phi_anchor,
                 max_outer=L2_MAX_OUTER,
                 max_minimize_iter=L2_MAX_MINIMIZE_ITER,
@@ -224,11 +255,18 @@ def run_l2_phase(deformation_3channel):
             info['local_timeouts_total'] += stats['local_timeouts']
             info['local_errors_total'] += stats['local_errors']
             info['local_successes_total'] += stats['local_successes']
-            T1, T2 = _triangle_areas_2d(phi[0], phi[1])
-            if int((T1 <= 0).sum() + (T2 <= 0).sum()) == 0:
+            # Update best across rounds.
+            if stats['n_neg_after'] < best_n_neg_global:
+                best_n_neg_global = stats['n_neg_after']
+                best_phi_global = pass_phi.copy()
+            if best_n_neg_global == 0:
                 break
             if not stats['stalled'] or r == L2_MAX_PERTURB_ROUNDS:
                 break
+            # Perturb FROM the best-seen state, so a bad round can't
+            # cause the next round to start from a worse position.
+            phi = best_phi_global.copy()
+            T1, T2 = _triangle_areas_2d(phi[0], phi[1])
             cell_min = np.minimum(T1, T2)
             cell_fold_mask = cell_min <= THRESHOLD - ERR_TOL
             pmask = binary_dilation(cell_fold_mask, iterations=2)
@@ -248,10 +286,9 @@ def run_l2_phase(deformation_3channel):
                 info['perturb_rounds'] += 1
     except Exception as exc:
         info['exception'] = f'{type(exc).__name__}: {exc}'
-    T1, T2 = _triangle_areas_2d(phi[0], phi[1])
-    info['final_stalled'] = bool(int((T1 <= 0).sum() + (T2 <= 0).sum()) > 0)
+    info['final_stalled'] = bool(best_n_neg_global > 0)
     info['wall_time'] = time.time() - t_start
-    return phi, info
+    return best_phi_global, info
 
 
 def run_l1_polish_phase(phi_l2, phi_anchor):
