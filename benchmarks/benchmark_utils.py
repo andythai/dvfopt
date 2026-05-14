@@ -210,10 +210,14 @@ def results_to_rows(results, extra_cols=None):
     base_cols = ["case", "n_neg_init", "n_neg_final", "min_jdet_init",
                  "min_jdet", "l2_err", "time"]
     extra = extra_cols or []
+    # Some notebooks store the standard CSV metrics under shorter keys such as
+    # ``neg`` and ``l2`` inside per-method result dicts.
     aliases = {
         "n_neg_final": ("n_neg_final", "neg"),
         "l2_err": ("l2_err", "l2"),
     }
+    # These keys identify nested method result payloads (for example
+    # ``windowed``/``fullgrid``) rather than shared metadata like ``jac_init``.
     metric_keys = {"min_jdet", "time", "n_neg_final", "neg", "l2_err", "l2"}
 
     def _round_if_float(value):
@@ -221,7 +225,7 @@ def results_to_rows(results, extra_cols=None):
             return round(value, 6)
         return value
 
-    def _has_metrics(payload):
+    def _is_method_result(payload):
         return isinstance(payload, dict) and any(key in payload for key in metric_keys)
 
     def _get_value(payload, key):
@@ -237,13 +241,15 @@ def results_to_rows(results, extra_cols=None):
     include_method = False
     rows = []
     for label, r in results.items():
+        # Split method-specific result dicts from shared case-level metadata.
         method_results = {
             name: value
             for name, value in r.items()
-            if _has_metrics(value)
+            if _is_method_result(value)
         }
         if method_results:
             include_method = True
+            # Shared metadata is copied into every per-method CSV row.
             common_data = {
                 name: value
                 for name, value in r.items()
