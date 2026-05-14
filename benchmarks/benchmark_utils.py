@@ -214,7 +214,7 @@ def results_to_rows(results, extra_cols=None):
         "n_neg_final": ("n_neg_final", "neg"),
         "l2_err": ("l2_err", "l2"),
     }
-    metric_keys = {"min_jdet", "time", *(key for values in aliases.values() for key in values)}
+    metric_keys = {"min_jdet", "time", "n_neg_final", "neg", "l2_err", "l2"}
 
     def _round_if_float(value):
         if isinstance(value, float):
@@ -237,20 +237,20 @@ def results_to_rows(results, extra_cols=None):
     include_method = False
     rows = []
     for label, r in results.items():
-        nested = {
+        method_results = {
             name: value
             for name, value in r.items()
             if _has_metrics(value)
         }
-        if nested:
+        if method_results:
             include_method = True
-            shared = {
+            common_data = {
                 name: value
                 for name, value in r.items()
-                if name not in nested
+                if name not in method_results
             }
-            for method, payload in nested.items():
-                merged = {**shared, **payload}
+            for method, payload in method_results.items():
+                merged = {**common_data, **payload}
                 row = {"case": label, "method": method}
                 for c in base_cols[1:] + extra:
                     row[c] = _round_if_float(_get_value(merged, c))

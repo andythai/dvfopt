@@ -6,9 +6,9 @@ import sys
 import numpy as np
 
 
-benchmark_utils_dir = Path(__file__).resolve().parents[1] / "benchmarks"
-if str(benchmark_utils_dir) not in sys.path:
-    sys.path.insert(0, str(benchmark_utils_dir))
+benchmarks_dir = Path(__file__).resolve().parents[1] / "benchmarks"
+if str(benchmarks_dir) not in sys.path:
+    sys.path.insert(0, str(benchmarks_dir))
 
 import benchmark_utils
 
