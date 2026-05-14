@@ -109,20 +109,25 @@ def normalize_benchmark_utils_imports(cell_source):
     """Split any benchmark_utils import accidentally fused onto a prior line."""
     normalized = []
     for idx, line in enumerate(cell_source):
-        if "from benchmark_utils" in line and not line.lstrip().startswith("from benchmark_utils"):
-            split_at = line.index("from benchmark_utils")
-            prefix = line[:split_at]
-            suffix = line[split_at:]
-            normalized.append(prefix + "\n")
-            normalized.append(suffix)
-        else:
-            if (
-                idx + 1 < len(cell_source)
-                and not line.endswith("\n")
-                and cell_source[idx + 1].lstrip().startswith("from benchmark_utils")
-            ):
-                line = line + "\n"
+        if (
+            idx + 1 < len(cell_source)
+            and not line.endswith("\n")
+            and cell_source[idx + 1].lstrip().startswith("from benchmark_utils")
+        ):
+            line = line + "\n"
+
+        if "from benchmark_utils" not in line:
             normalized.append(line)
+            continue
+
+        parts = re.split(r"(from benchmark_utils)", line)
+        current = parts[0]
+        for marker, suffix in zip(parts[1::2], parts[2::2]):
+            if current:
+                normalized.append(current + "\n")
+            current = marker + suffix
+        if current:
+            normalized.append(current)
     return normalized
 
 
