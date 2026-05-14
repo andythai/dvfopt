@@ -122,8 +122,7 @@ def triangulated_shoelace_constraint(phi_xy, submatrix_size,
     """Flatten both triangle areas for the SLSQP constraint vector.
 
     Layout: ``[T1(r, c) for (r, c) in cells] + [T2(r, c) for (r, c) in cells]``,
-    i.e. all T1 entries first, then all T2 entries.  This matches the row
-    layout used by ``triangulated_shoelace_constraint_jacobian_2d``.
+    i.e. all T1 entries first, then all T2 entries.
     """
     sy, sx = _unpack_size(submatrix_size)
     pixels = sy * sx

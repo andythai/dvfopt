@@ -280,12 +280,18 @@ def _serial_fix_voxel(
                  f"  [skip] Frozen edges have neg Jdet at "
                  f"win {sz}x{sy}x{sx} - growing")
             if sz < max_sz or sy < max_sy or sx < max_sx:
-                subvolume_size = (min(sz + 2, max_sz),
-                                  min(sy + 2, max_sy),
-                                  min(sx + 2, max_sx))
-                subvolume_size = _clamp_to_voxel_budget(
-                    subvolume_size, max_window_voxels, min_window)
-            continue
+                grown = (min(sz + 2, max_sz),
+                         min(sy + 2, max_sy),
+                         min(sx + 2, max_sx))
+                clamped = _clamp_to_voxel_budget(
+                    grown, max_window_voxels, min_window)
+                if clamped != (sz, sy, sx):
+                    subvolume_size = clamped
+                    continue
+                _log(verbose, 2,
+                     "  [skip] Voxel cap blocked growth; "
+                     "treating current window as max")
+            window_reached_max = True
 
         per_index_iter += 1
         window_counts[subvolume_size] += 1
@@ -338,5 +344,4 @@ def _serial_fix_voxel(
             window_reached_max = True
 
     return jacobian_matrix, subvolume_size, per_index_iter, (cz, cy, cx)
-
 
