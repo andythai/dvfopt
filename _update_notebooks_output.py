@@ -136,6 +136,8 @@ def add_benchmark_utils_import(cell_source, needed):
         return ensure_imports(cell_source, needed)
     if "from dvfopt" in joined or "import dvfopt" in joined:
         extra = f"from benchmark_utils import (\n    {', '.join(needed)},\n)\n"
+        if cell_source and not cell_source[-1].endswith("\n"):
+            extra = "\n" + extra
         return cell_source + [extra]
     return cell_source
 
