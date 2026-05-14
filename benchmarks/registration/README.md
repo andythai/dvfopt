@@ -63,6 +63,7 @@ field.
 
 ## Output
 
-All notebooks write to `output/registration/<notebook_name>/` relative
-to the repo root. See [`../README.md`](../README.md) for the shared
-output convention.
+Notebooks write results under a method-specific output directory
+relative to the repo root: `output/slsqp/<notebook_name>/` for SLSQP
+runs and `output/barrier/<notebook_name>/` for barrier runs. See
+[`../README.md`](../README.md) for the shared output convention.
