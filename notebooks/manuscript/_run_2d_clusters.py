@@ -55,6 +55,10 @@ BBOX_PAD = 1
 MAX_CLUSTER_CELLS = 2000         # crops above this are skipped (over SLSQP cap)
 MAX_CLUSTER_PER_AXIS = 60
 MAX_CLUSTER_OUTER_ITERS = 20
+MAX_SLICE_TIME_S = 1800          # bail out after 30 min on one slice so a
+                                  # pathologically dense slice can't hog the
+                                  # whole run (we'll come back to those once
+                                  # the easier ones are characterised)
 
 # --- Per-cluster solver budget (notebook 17/18 style) ---------------
 L2_MAX_PASSES = 15               # max L2 SLSQP passes; loop exits when n_neg=0
@@ -414,7 +418,10 @@ def process_one_slice(z, phi_full, phi_anchor_full):
     # can introduce new folds at adjacent cells. Re-find clusters and
     # re-solve until n_neg = 0 or no improvement.
     prev_n_neg = init_n_neg
+    t_slice_start = time.time()
     for outer_it in range(MAX_CLUSTER_OUTER_ITERS):
+        if time.time() - t_slice_start > MAX_SLICE_TIME_S:
+            break
         clusters = enumerate_clusters_2d(phi_slice,
                                           MAX_CLUSTER_PER_AXIS,
                                           MAX_CLUSTER_CELLS)
@@ -422,7 +429,9 @@ def process_one_slice(z, phi_full, phi_anchor_full):
             break
         total_clusters += len(clusters)
         any_processed_this_pass = False
-        for c in clusters:
+        for ci, c in enumerate(clusters):
+            if time.time() - t_slice_start > MAX_SLICE_TIME_S:
+                break
             crow, phi_l1 = solve_one_cluster(c, phi_slice, phi_anchor_slice, z)
             crow['cluster_outer_it'] = outer_it
             cluster_rows.append(crow)
@@ -442,6 +451,15 @@ def process_one_slice(z, phi_full, phi_anchor_full):
                 x0, x1 = c['x0'], c['x1']
                 vy = slice(y0, y1 + 1); vx = slice(x0, x1 + 1)
                 phi_slice[:, vy, vx] = phi_l1
+            # Heartbeat every 25 clusters so the user can see progress
+            # within a long-running slice.
+            if (ci + 1) % 25 == 0:
+                T1_now, T2_now = _triangle_areas_2d(phi_slice[0], phi_slice[1])
+                n_now = int((T1_now <= 0).sum() + (T2_now <= 0).sum())
+                log_line(f'    [z={z} outer={outer_it} c={ci+1}/{len(clusters)}]  '
+                          f'n_neg={n_now}  feas_so_far={n_feasible} '
+                          f'skip={n_skipped} to={n_l2_timeout}  '
+                          f'elapsed_in_slice={time.time()-t_slice_start:.0f}s')
         # Continue iterating until n_neg=0 or MAX_CLUSTER_OUTER_ITERS.
         # Don't bail on a plateau: a non-improving iter often shuffles
         # cluster boundaries enough that the next iter clears residuals.
@@ -491,8 +509,20 @@ def main():
     corrected = load_checkpoint(phi_full)
     phi_anchor = phi_full.copy()
     log_line(f'resuming with {len(done)}/{D} slices done')
-    t_run = time.time()
+    # Process slices in *ascending* order of initial fold count -- easy
+    # slices first so we get fast wins, then attempt the harder ones.
+    # Heavy slices (3000+ folds) can take an hour each; we don't want
+    # those blocking the whole run.
+    t_scan = time.time()
+    init_folds = np.zeros(D, dtype=np.int64)
     for z in range(D):
+        T1, T2 = _triangle_areas_2d(phi_anchor[1, z], phi_anchor[2, z])
+        init_folds[z] = int((T1 <= 0).sum() + (T2 <= 0).sum())
+    z_order = np.argsort(init_folds)  # ascending: easiest first
+    log_line(f'pre-scan: {time.time()-t_scan:.1f}s  fold range [{init_folds.min()}..{init_folds.max()}]')
+    t_run = time.time()
+    for z_int in z_order:
+        z = int(z_int)
         if z in done:
             continue
         try:
