@@ -120,12 +120,16 @@ def run_minimal_iterative_2d(
                 enforce_triangles=enforce_triangles,
             )
 
+            minimize_options = {"maxiter": max_minimize_iter}
+            if method.upper() == "SLSQP":
+                minimize_options["ftol"] = 1e-9
+
             res = minimize(
                 objective_euc, phi_sub_flat,
                 args=(phi_sub_flat,),
                 method=method, jac=True,
                 constraints=constraints,
-                options={"maxiter": max_minimize_iter, "ftol": 1e-9},
+                options=minimize_options,
             )
             inner_iters_total += int(res.nit)
             n_windows_this_iter = 1
