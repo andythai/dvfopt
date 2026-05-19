@@ -41,7 +41,7 @@ def test_required_trajectory_columns():
         )
 
 
-def test_to_parquet_roundtrip(tmp_path):
+def test_to_csv_roundtrip(tmp_path):
     phi = np.arange(2 * 4 * 4, dtype=np.float64).reshape(2, 4, 4)
     traj = pd.DataFrame({
         "outer_iter": [0, 1], "time_s": [0.0, 0.5],
@@ -55,9 +55,9 @@ def test_to_parquet_roundtrip(tmp_path):
         converged=True, timed_out=False, error=None,
         meta={"variant": "soft_margin", "case": "synth2d_single_cell_flip"},
     )
-    path = tmp_path / "result.parquet"
-    r.to_parquet(path)
-    r2 = SolverResult.from_parquet(path)
+    path = tmp_path / "result.csv"
+    r.to_csv(path)
+    r2 = SolverResult.from_csv(path)
     np.testing.assert_array_equal(r2.phi_final, phi)
     pd.testing.assert_frame_equal(r2.trajectory, traj)
     assert r2.converged == r.converged

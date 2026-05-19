@@ -26,7 +26,7 @@ from scipy.ndimage import label as scipy_label
 from scipy.optimize import minimize
 
 from dvfopt.core.objective import objective_euc
-from dvfopt.core.slsqp.constraints import _build_constraints
+from dvfopt.core.slsqp.constraints import _build_constraints, _quality_map
 from dvfopt.core.slsqp.spatial import (
     argmin_quality, neg_jdet_bounding_window, get_nearest_center,
     _edge_flags, get_phi_sub_flat_padded,
@@ -83,7 +83,13 @@ def run_minimal_iterative_2d(
     err_msg = None
 
     jacobian_matrix = jacobian_det2D(phi)
-    quality_matrix = jacobian_matrix.copy()
+    quality_matrix = _quality_map(
+        phi,
+        enforce_shoelace=False,
+        enforce_injectivity=False,
+        enforce_triangles=enforce_triangles,
+        jacobian_matrix=jacobian_matrix,
+    )
     inner_iters_total = 0
     n_windows_this_iter = 0
 
@@ -148,7 +154,13 @@ def run_minimal_iterative_2d(
             phi[0, cy - hy:cy + hy_hi, cx - hx:cx + hx_hi] = phiy
 
             jacobian_matrix = jacobian_det2D(phi)
-            quality_matrix = jacobian_matrix.copy()
+            quality_matrix = _quality_map(
+                phi,
+                enforce_shoelace=False,
+                enforce_injectivity=False,
+                enforce_triangles=enforce_triangles,
+                jacobian_matrix=jacobian_matrix,
+            )
 
             acc.record(outer_iter=iteration, phi=phi,
                        phi_initial=phi_initial,

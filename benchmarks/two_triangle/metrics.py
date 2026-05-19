@@ -20,8 +20,8 @@ def _is_3d(phi: np.ndarray) -> bool:
 def fold_counts(phi: np.ndarray, *, threshold: float = 0.01) -> dict:
     """Return {fold_count_jdet, fold_count_tri, max_violation} for 2D or 3D phi.
 
-    `max_violation` is the minimum constraint value (the most negative cell);
-    positive means the field is feasible.
+    `max_violation` is min(active_constraint_value - threshold), so negative
+    indicates infeasibility under the configured threshold.
     """
     if _is_3d(phi):
         jdet = jacobian_det3D(phi)
@@ -31,7 +31,7 @@ def fold_counts(phi: np.ndarray, *, threshold: float = 0.01) -> dict:
         # When the strict 6-tet count helper lands in dvfopt this can be
         # swapped in; for now report jdet as the proxy.
         n_tri = n_jdet
-        max_viol = float(jdet.min())
+        max_viol = float(jdet.min() - threshold)
     else:
         # Convert (3, 1, H, W) to (2, H, W) if needed
         if phi.ndim == 4 and phi.shape[0] == 3 and phi.shape[1] == 1:
@@ -42,7 +42,7 @@ def fold_counts(phi: np.ndarray, *, threshold: float = 0.01) -> dict:
         n_jdet = int((jdet < threshold).sum())
         n_tri = triangle_sign_count_negatives(phi2)
         tri_areas = triangle_sign_areas2D(phi2)
-        max_viol = float(min(jdet.min(), tri_areas.min()))
+        max_viol = float(min(jdet.min(), tri_areas.min()) - threshold)
     return {
         "fold_count_jdet": n_jdet,
         "fold_count_tri": n_tri,

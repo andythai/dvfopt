@@ -1,4 +1,4 @@
-"""SolverResult dataclass + Parquet serialization."""
+"""SolverResult dataclass + dependency-free bundle serialization."""
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -28,11 +28,9 @@ class SolverResult:
         if missing:
             raise ValueError(f"missing trajectory columns: {missing}")
 
-    def to_parquet(self, path) -> None:
+    def to_csv(self, path) -> None:
         path = Path(path)
-        # Write trajectory with metadata columns + serialized phi/meta in
-        # a sibling .npz + .json so the parquet file stays tidy.
-        self.trajectory.to_parquet(path)
+        self.trajectory.to_csv(path, index=False)
         np.savez_compressed(path.with_suffix(".phi.npz"), phi=self.phi_final)
         sidecar = {
             "converged": self.converged,
@@ -43,9 +41,9 @@ class SolverResult:
         path.with_suffix(".meta.json").write_text(json.dumps(sidecar, default=str))
 
     @classmethod
-    def from_parquet(cls, path) -> "SolverResult":
+    def from_csv(cls, path) -> "SolverResult":
         path = Path(path)
-        traj = pd.read_parquet(path)
+        traj = pd.read_csv(path)
         phi = np.load(path.with_suffix(".phi.npz"))["phi"]
         sidecar = json.loads(path.with_suffix(".meta.json").read_text())
         return cls(
@@ -56,3 +54,11 @@ class SolverResult:
             error=sidecar["error"],
             meta=sidecar["meta"],
         )
+
+    # Backward-compatible aliases with old API names.
+    def to_parquet(self, path) -> None:
+        self.to_csv(path)
+
+    @classmethod
+    def from_parquet(cls, path) -> "SolverResult":
+        return cls.from_csv(path)

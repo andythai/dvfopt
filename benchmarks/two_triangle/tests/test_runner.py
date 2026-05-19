@@ -19,10 +19,10 @@ def test_run_sweep_smoke(tmp_path):
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text())
     assert manifest["n_cells"] == 1
-    # Locate the single result parquet
-    parquet_files = list(out_dir.rglob("*.parquet"))
-    assert len(parquet_files) == 1
-    r = SolverResult.from_parquet(parquet_files[0])
+    # Locate the single result csv bundle
+    result_files = list(out_dir.rglob("*.csv"))
+    assert len(result_files) == 1
+    r = SolverResult.from_csv(result_files[0])
     # The fix from Task 3 changed the case to a 5x5 grid, not 6x6 — adjust expectations.
     # Just confirm we got a valid 2D phi back.
     assert r.phi_final.ndim == 3 and r.phi_final.shape[0] == 2

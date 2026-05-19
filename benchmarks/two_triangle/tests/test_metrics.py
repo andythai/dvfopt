@@ -15,7 +15,7 @@ def test_fold_counts_clean_2d():
     out = metrics.fold_counts(phi, threshold=0.01)
     assert out["fold_count_jdet"] == 0
     assert out["fold_count_tri"] == 0
-    assert out["max_violation"] > 0  # min Jdet of identity ~ 1
+    assert out["max_violation"] > 0  # min Jdet of identity ~ 1, then minus threshold
 
 
 def test_fold_counts_clean_3d():
@@ -23,6 +23,12 @@ def test_fold_counts_clean_3d():
     out = metrics.fold_counts(phi, threshold=0.01)
     assert out["fold_count_jdet"] == 0
     assert out["fold_count_tri"] == 0
+
+
+def test_max_violation_reflects_threshold_feasibility():
+    phi = _identity_phi_2d()
+    out = metrics.fold_counts(phi, threshold=1.1)
+    assert out["max_violation"] < 0
 
 
 def test_l2_displacement_zero_when_unchanged():

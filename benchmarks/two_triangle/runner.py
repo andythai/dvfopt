@@ -72,7 +72,7 @@ def _run_cell(variant_name: str, case_name: str, *,
     case_meta = registry.case_metadata(case_name)
     cell_dir = output_root / variant_name
     cell_dir.mkdir(parents=True, exist_ok=True)
-    parquet = cell_dir / f"{case_name}.parquet"
+    csv_path = cell_dir / f"{case_name}.csv"
 
     entry = {
         "variant": variant_name, "case": case_name,
@@ -87,7 +87,7 @@ def _run_cell(variant_name: str, case_name: str, *,
             timeout_s=timeout_s)
         elapsed = time.perf_counter() - t0
         rss_after = _current_rss_mb()
-        result.to_parquet(parquet)
+        result.to_csv(csv_path)
         entry.update({
             "status": "ok",
             "wall_s": elapsed,
@@ -99,7 +99,7 @@ def _run_cell(variant_name: str, case_name: str, *,
             "final_folds_jdet": int(result.trajectory.iloc[-1]["fold_count_jdet"]),
             "final_folds_tri": int(result.trajectory.iloc[-1]["fold_count_tri"]),
             "n_traj_rows": len(result.trajectory),
-            "parquet": str(parquet.relative_to(output_root)),
+            "result_csv": str(csv_path.relative_to(output_root)),
         })
     except FileNotFoundError as exc:
         entry.update({"status": "skipped",
