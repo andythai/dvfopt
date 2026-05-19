@@ -111,6 +111,8 @@ def run_minimal_iterative_2d(
                                                  slice_shape, max_window)
             phi_sub_flat, actual_size = get_phi_sub_flat_padded(
                 phi, cz, cy, cx, slice_shape, sub_size)
+            phi_init_sub_flat, _ = get_phi_sub_flat_padded(
+                phi_initial, cz, cy, cx, slice_shape, sub_size)
 
             constraints = constraint_builder(
                 phi_sub_flat, actual_size, is_at_edge, win_at_max,
@@ -126,7 +128,7 @@ def run_minimal_iterative_2d(
 
             res = minimize(
                 objective_euc, phi_sub_flat,
-                args=(phi_sub_flat,),
+                args=(phi_init_sub_flat,),
                 method=method, jac=True,
                 constraints=constraints,
                 options=minimize_options,
