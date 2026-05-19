@@ -19,6 +19,7 @@ import sys
 import time
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutTimeout
+from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
 import pandas as pd
@@ -53,15 +54,15 @@ EPS_L1 = 1e-4
 #      (no outside cell to constrain).
 # MERGE_DILATION scales DOWN with residual count: dense fold regions need
 # joint solving (high merge), but few residuals just need tight individual
-# bboxes (low merge). Bigger bboxes are worse for SLSQP, so once the slice
-# is mostly cleared we shrink dilation to keep each cluster minimal.
+# bboxes (low merge). Floor at 1 -- a MERGE=0 cluster is just (fold cell +
+# 1-pad) = 3x3 cell bbox = only 4 movable corners x 2 channels = 8 variables.
+# Severe single-cell folds (min_tri ~ -1) need more degrees of freedom; one
+# more layer of dilation gives 5x5 cell bbox = ~32 movable variables.
 def _merge_for_n_neg(n_neg):
     """Return MERGE_DILATION as a function of current fold-triangle count."""
     if n_neg > 200:
         return 2
-    if n_neg > 50:
-        return 1
-    return 0
+    return 1
 
 
 MERGE_DILATION = 2          # default / max; used only as the upper bound below.
@@ -69,17 +70,17 @@ BBOX_PAD = 1
 MAX_CLUSTER_CELLS = 2000         # crops above this are skipped (over SLSQP cap)
 MAX_CLUSTER_PER_AXIS = 60
 MAX_CLUSTER_OUTER_ITERS = 20
-MAX_SLICE_TIME_S = 1800          # bail out after 30 min on one slice so a
-                                  # pathologically dense slice can't hog the
-                                  # whole run (we'll come back to those once
-                                  # the easier ones are characterised)
+MAX_SLICE_TIME_S = 144000        # 40 h cap; per-cluster timeout is now
+                                  # 36000s so the slice budget must be a
+                                  # multiple of that (~4 outer-iter
+                                  # retries) on dense residuals
 
 # --- Per-cluster solver budget (notebook 17/18 style) ---------------
 L2_MAX_PASSES = 15               # max L2 SLSQP passes; loop exits when n_neg=0
 L2_PASS_MAX_ITER = 80
-L2_PASS_TIMEOUT_S = 60
+L2_PASS_TIMEOUT_S = 36000
 L1_POLISH_MAX_ITER = 120
-L1_POLISH_TIMEOUT_S = 60
+L1_POLISH_TIMEOUT_S = 36000
 
 CHECKPOINT_EVERY = 5             # checkpoint every N slices
 
@@ -91,7 +92,9 @@ CHECKPOINT_EVERY = 5             # checkpoint every N slices
 # so frozen-edge corners (which the solver assumed at snapshot values) stay
 # at those snapshot values.
 N_PARALLEL_WORKERS = max(1, (os.cpu_count() or 4) - 2)
-PER_CLUSTER_TIMEOUT_S = 60       # passed to ``future.result(timeout=...)``
+PER_CLUSTER_TIMEOUT_S = 36000     # passed to ``future.result(timeout=...)``
+MAX_POOL_RETRIES = 3             # rebuild a crashed worker pool this many
+                                  # times before skipping the slice
 
 OUTPUT_DIR = os.path.join(_HERE, 'output', '2d_real_full')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -99,6 +102,13 @@ SLICE_CSV_PATH = os.path.join(OUTPUT_DIR, 'per_slice.csv')
 CLUSTER_CSV_PATH = os.path.join(OUTPUT_DIR, 'per_cluster.csv')
 CKPT_PATH = os.path.join(OUTPUT_DIR, 'checkpoint.npz')
 LOG_PATH = os.path.join(OUTPUT_DIR, 'run.log')
+
+# Per-slice artefacts: the corrected slice as its own .npy, and a
+# before/after deformation-grid figure.
+SLICES_DIR = os.path.join(OUTPUT_DIR, 'slices')
+FIGS_DIR = os.path.join(OUTPUT_DIR, 'figs')
+os.makedirs(SLICES_DIR, exist_ok=True)
+os.makedirs(FIGS_DIR, exist_ok=True)
 
 DATA_PATH = os.path.join(_REPO_ROOT, 'data',
                          'corrected_correspondences_count_touching',
@@ -184,9 +194,38 @@ def load_done_zs():
 
 
 def save_checkpoint(arr):
+    """Write the full corrected volume to checkpoint.npz.
+
+    A checkpoint failure must never crash the run: the per-slice .npy
+    files are the authoritative record, so on any failure we log and
+    return. Windows can also transiently lock the destination file
+    (antivirus, another reader) and make ``os.replace`` raise
+    ``PermissionError`` -- that is retried with a short backoff.
+    """
     tmp = CKPT_PATH + '.tmp.npz'
-    np.savez_compressed(tmp, phi_corrected=arr)
-    os.replace(tmp, CKPT_PATH)
+    try:
+        np.savez_compressed(tmp, phi_corrected=arr)
+    except Exception as exc:  # noqa: BLE001
+        log_line(f'[WARN] checkpoint compress failed: '
+                 f'{type(exc).__name__}: {exc} (per-slice npys intact)')
+        return
+    for _ in range(10):
+        try:
+            os.replace(tmp, CKPT_PATH)
+            return
+        except PermissionError:
+            time.sleep(2.0)
+        except Exception as exc:  # noqa: BLE001
+            log_line(f'[WARN] checkpoint replace failed: '
+                     f'{type(exc).__name__}: {exc} (per-slice npys intact)')
+            break
+    else:
+        log_line('[WARN] checkpoint file stayed locked; skipping this '
+                 'checkpoint -- per-slice npys are intact')
+    try:
+        os.remove(tmp)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def load_checkpoint(default):
@@ -202,10 +241,112 @@ def load_checkpoint(default):
     return default.copy()
 
 
+def load_corrected_volume(default):
+    """Reconstruct the corrected volume from the per-slice .npy files.
+
+    The per-slice npys are the authoritative record -- each is written
+    the moment its slice finishes, so this reconstruction is lag-free.
+    checkpoint.npz, by contrast, is only refreshed every
+    ``CHECKPOINT_EVERY`` slices and lags if the run is killed (or if a
+    transient Windows file lock makes a checkpoint write fail). Falls
+    back to checkpoint.npz, then the original field, when no per-slice
+    npys exist yet.
+    """
+    files = []
+    if os.path.isdir(SLICES_DIR):
+        files = [f for f in os.listdir(SLICES_DIR)
+                 if f.startswith('slice_z') and f.endswith('.npy')]
+    if not files:
+        return load_checkpoint(default)
+    vol = default.copy()
+    n = 0
+    for f in files:
+        try:
+            z = int(f[len('slice_z'):-len('.npy')])
+            vol[:, z] = np.load(os.path.join(SLICES_DIR, f))[:, 0]
+            n += 1
+        except Exception:  # noqa: BLE001
+            pass
+    log_line(f'loaded corrected volume from {n} per-slice npys')
+    return vol
+
+
 def log_line(msg):
     print(msg, flush=True)
     with open(LOG_PATH, 'a') as f:
         f.write(msg + '\n')
+
+
+def _slice_npy_path(z):
+    return os.path.join(SLICES_DIR, f'slice_z{int(z):03d}.npy')
+
+
+def _grid_fig_path(z):
+    return os.path.join(FIGS_DIR, f'grid_z{int(z):03d}.png')
+
+
+def save_slice_npy(z, corrected_full):
+    """Save the corrected slice z as its own ``(3, 1, H, W)`` array."""
+    np.save(_slice_npy_path(z), corrected_full[:, int(z):int(z) + 1])
+
+
+def save_grid_fig(z, phi_anchor_full, corrected_full):
+    """Save a before/after deformation-grid figure for slice z.
+
+    Full-resolution wireframe: every grid row and column line is drawn,
+    warped by the displacement field. A fold shows up as grid lines
+    crossing over each other. No per-cell colour fills (kept fast and
+    light across all 528 slices).
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    z = int(z)
+    H, W = phi_anchor_full.shape[2], phi_anchor_full.shape[3]
+    yy, xx = np.mgrid[0:H, 0:W].astype(float)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+    for ax, src, label in [
+        (axes[0], phi_anchor_full, 'Initial'),
+        (axes[1], corrected_full, 'Corrected'),
+    ]:
+        dy = src[1, z]
+        dx = src[2, z]
+        def_x = xx + dx
+        def_y = yy + dy
+        T1, T2 = _triangle_areas_2d(dy, dx)
+        n_neg = int((T1 <= 0).sum() + (T2 <= 0).sum())
+        # Row lines: one polyline per grid row; column lines: one per col.
+        rows = [np.column_stack([def_x[i, :], def_y[i, :]]) for i in range(H)]
+        cols = [np.column_stack([def_x[:, j], def_y[:, j]]) for j in range(W)]
+        ax.add_collection(LineCollection(rows + cols, colors='k',
+                                         linewidths=0.25))
+        pad = max(W, H) * 0.03
+        ax.set_xlim(def_x.min() - pad, def_x.max() + pad)
+        ax.set_ylim(def_y.max() + pad, def_y.min() - pad)
+        ax.set_aspect('equal')
+        ax.set_title(f'{label}  z={z}  (folded triangles = {n_neg})',
+                     fontsize=11)
+    fig.suptitle(f'Deformation grid before/after correction  -  z={z}',
+                 fontsize=13, fontweight='bold')
+    fig.savefig(_grid_fig_path(z), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def save_slice_outputs(z, phi_anchor_full, corrected_full):
+    """Save both per-slice artefacts (npy + grid figure) for slice z.
+
+    Failures here must never abort the run, so each is guarded.
+    """
+    try:
+        save_slice_npy(z, corrected_full)
+    except Exception as exc:  # noqa: BLE001
+        log_line(f'[WARN] z={z} npy save failed: {type(exc).__name__}: {exc}')
+    try:
+        save_grid_fig(z, phi_anchor_full, corrected_full)
+    except Exception as exc:  # noqa: BLE001
+        log_line(f'[WARN] z={z} grid fig failed: {type(exc).__name__}: {exc}')
 
 
 def _component_corner_mask(component_mask, h, w):
@@ -223,14 +364,15 @@ def _component_corner_mask(component_mask, h, w):
 
 
 def enumerate_clusters_2d(phi_slice, max_axis, max_cells,
-                           merge_dilation=None):
+                           merge_dilation=None, extra_dilation=None):
     """phi_slice: (2, H, W). Returns list of cluster dicts.
 
-    Fold cells (min(T1, T2) <= 0) are dilated by ``merge_dilation``, then
-    connected-component labelled. With high merge_dilation, close fold
-    regions merge into one cluster (good for dense folds); with low or
-    zero merge_dilation, each fold cell becomes its own tight cluster
-    (good for sparse residuals).
+    Fold cells (min(T1, T2) <= 0) are dilated by ``merge_dilation``,
+    PLUS an extra per-cell dilation given by ``extra_dilation`` (shape
+    (Hc, Wc), int). Fold cells that were in a cluster that failed to
+    improve in the previous outer iter get +1 to their extra_dilation,
+    causing their bbox to grow on the next attempt. Cells in succeeding
+    clusters get reset to 0.
     """
     T1, T2 = _triangle_areas_2d(phi_slice[0], phi_slice[1])
     cell_min = np.minimum(T1, T2)
@@ -242,6 +384,14 @@ def enumerate_clusters_2d(phi_slice, max_axis, max_cells,
         merge_dilation = _merge_for_n_neg(n_neg)
     merged_mask = (binary_dilation(cell_fold_mask, iterations=merge_dilation)
                    if merge_dilation > 0 else cell_fold_mask.copy())
+    # Cells in clusters that failed to improve get progressively more
+    # dilation on each retry. Other cells stay at the base.
+    if extra_dilation is not None:
+        max_e = int(extra_dilation.max())
+        for e in range(1, max_e + 1):
+            layer = (extra_dilation >= e) & cell_fold_mask
+            if layer.any():
+                merged_mask |= binary_dilation(layer, iterations=merge_dilation + e)
     labels, n_comp = cc_label(merged_mask)
     Hc, Wc = cell_fold_mask.shape
     bboxes = find_objects(labels)
@@ -495,15 +645,21 @@ def process_one_slice(z, phi_full, phi_anchor_full, executor=None):
     # re-solve until n_neg = 0 or no improvement.
     prev_n_neg = init_n_neg
     t_slice_start = time.time()
+    # Per-cell extra-dilation: counts how many times a fold cell has
+    # been in a cluster that failed to improve. Fed back into
+    # enumerate_clusters_2d so stuck clusters grow their bbox per retry,
+    # while clusters that succeed reset to 0.
+    cell_dims = (phi_slice.shape[1] - 1, phi_slice.shape[2] - 1)
+    extra_dilation = np.zeros(cell_dims, dtype=np.int32)
     for outer_it in range(MAX_CLUSTER_OUTER_ITERS):
         if time.time() - t_slice_start > MAX_SLICE_TIME_S:
             break
-        # merge_dilation is set inside enumerate_clusters_2d based on
-        # current n_neg: dense slices use MERGE=2, sparse residuals
-        # use MERGE=1 or MERGE=0 for tight individual bboxes.
+        # merge_dilation: scales with n_neg (set inside the function).
+        # extra_dilation: per-cell bump from failed clusters.
         clusters = enumerate_clusters_2d(phi_slice,
                                           MAX_CLUSTER_PER_AXIS,
-                                          MAX_CLUSTER_CELLS)
+                                          MAX_CLUSTER_CELLS,
+                                          extra_dilation=extra_dilation)
         if not clusters:
             break
         total_clusters += len(clusters)
@@ -564,6 +720,17 @@ def process_one_slice(z, phi_full, phi_anchor_full, executor=None):
                 total_l1_t += float(crow.get('l1_t', 0.0) or 0.0)
                 if phi_l1 is not None:
                     _splice_interior(phi_slice, c, phi_l1)
+                # Update per-cell extra_dilation for cells in this
+                # cluster: cells in failing clusters get +1 (so next
+                # iter dilates them more); cells in succeeding clusters
+                # reset to 0.
+                y0, y1 = c['y0'], c['y1']
+                x0, x1 = c['x0'], c['x1']
+                if crow.get('feasible'):
+                    extra_dilation[y0:y1, x0:x1] = 0
+                else:
+                    extra_dilation[y0:y1, x0:x1] = np.minimum(
+                        extra_dilation[y0:y1, x0:x1] + 1, 4)
             # Heartbeat at the end of each round so the user sees progress.
             T1_now, T2_now = _triangle_areas_2d(phi_slice[0], phi_slice[1])
             n_now = int((T1_now <= 0).sum() + (T2_now <= 0).sum())
@@ -617,9 +784,21 @@ def main():
     D, H, W = phi_full.shape[1:]
     init_csvs()
     done = load_done_zs()
-    corrected = load_checkpoint(phi_full)
+    corrected = load_corrected_volume(phi_full)
     phi_anchor = phi_full.copy()
     log_line(f'resuming with {len(done)}/{D} slices done')
+    # Backfill per-slice artefacts for slices already done before this
+    # feature existed: any done-slice missing its .npy / grid figure gets
+    # one generated from the checkpoint volume. Only missing files are
+    # written, so this is cheap on subsequent restarts.
+    backfill = [z for z in sorted(done)
+                if not (os.path.exists(_slice_npy_path(z))
+                        and os.path.exists(_grid_fig_path(z)))]
+    if backfill:
+        log_line(f'backfilling per-slice outputs for {len(backfill)} slices')
+        for z in backfill:
+            save_slice_outputs(z, phi_anchor, corrected)
+        log_line(f'backfill done ({len(backfill)} slices)')
     # Process slices in *ascending* order of initial fold count -- easy
     # slices first so we get fast wins, then attempt the harder ones.
     # Heavy slices (3000+ folds) can take an hour each; we don't want
@@ -634,20 +813,52 @@ def main():
     t_run = time.time()
     log_line(f'parallel executor: {N_PARALLEL_WORKERS} workers')
     # One long-lived ProcessPoolExecutor for the whole run -- spawn cost
-    # is paid once at startup instead of per cluster.
+    # is paid once at startup instead of per cluster. If a worker dies
+    # (OOM / native crash) the pool becomes permanently broken, so we
+    # detect BrokenProcessPool, rebuild the pool, and retry the slice.
     ctx = mp.get_context('spawn')
-    with ProcessPoolExecutor(max_workers=N_PARALLEL_WORKERS, mp_context=ctx) as executor:
+
+    def _new_executor():
+        return ProcessPoolExecutor(max_workers=N_PARALLEL_WORKERS,
+                                   mp_context=ctx)
+
+    executor = _new_executor()
+    try:
         for z_int in z_order:
             z = int(z_int)
             if z in done:
                 continue
-            try:
-                slice_row, cluster_rows, phi_slice_new = process_one_slice(
-                    z, corrected, phi_anchor, executor=executor)
-            except Exception as exc:
-                import traceback
-                tb = traceback.format_exc(limit=4).replace('\n', ' | ')
-                log_line(f'[ERR] z={z}  {type(exc).__name__}: {exc} :: {tb}')
+            slice_row = cluster_rows = phi_slice_new = None
+            pool_retries = 0
+            while True:
+                try:
+                    slice_row, cluster_rows, phi_slice_new = process_one_slice(
+                        z, corrected, phi_anchor, executor=executor)
+                    break
+                except BrokenProcessPool as exc:
+                    pool_retries += 1
+                    log_line(f'[POOL] z={z} worker pool broke ({exc}); '
+                             f'rebuilding (retry {pool_retries}/'
+                             f'{MAX_POOL_RETRIES})')
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
+                    executor = _new_executor()
+                    if pool_retries >= MAX_POOL_RETRIES:
+                        log_line(f'[ERR] z={z} skipped: pool broke '
+                                 f'{pool_retries}x in a row')
+                        slice_row = None
+                        break
+                    # else: loop and retry the whole slice on the fresh pool
+                except Exception as exc:
+                    import traceback
+                    tb = traceback.format_exc(limit=4).replace('\n', ' | ')
+                    log_line(f'[ERR] z={z}  {type(exc).__name__}: {exc} '
+                             f':: {tb}')
+                    slice_row = None
+                    break
+            if slice_row is None:
                 continue
             if phi_slice_new is not None:
                 corrected[1, z] = phi_slice_new[0]
@@ -656,6 +867,8 @@ def main():
             for crow in cluster_rows:
                 append_row(CLUSTER_CSV_PATH, CLUSTER_COLUMNS, crow)
             done.add(z)
+            # Per-slice artefacts: corrected slice .npy + before/after grid.
+            save_slice_outputs(z, phi_anchor, corrected)
             log_line(
                 f'[slice] z={z:>4d}  init={slice_row["init_n_neg_tri"]:>5d}  '
                 f'final={slice_row["after_l1_n_neg_tri"]:>5d}  '
@@ -673,6 +886,11 @@ def main():
             if len(done) % CHECKPOINT_EVERY == 0:
                 save_checkpoint(corrected)
                 log_line(f'[ckpt] saved, done={len(done)}/{D}')
+    finally:
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
     save_checkpoint(corrected)
     log_line(f'[end] {time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}  '
               f'done={len(done)}/{D}  elapsed={time.time()-t_run:.0f}s')
